@@ -33,6 +33,17 @@
 #define _GNU_SOURCE 1
 #endif
 
+#ifdef LOG_PREFIX
+#undef LOG_PREFIX
+#endif
+#define LOG_PREFIX "amdgpu_plugin: "
+
+#ifdef DEBUG
+#define plugin_log_msg(fmt, ...) pr_debug(fmt, ##__VA_ARGS__)
+#else
+#define plugin_log_msg(fmt, ...) {}
+#endif
+
 struct vma_metadata {
 	struct list_head list;
 	uint64_t old_pgoff;
@@ -412,7 +423,7 @@ static int dump_devices(int fd,
 		goto exit;
 	}
 
-	pr_debug("Number of GPUs:%d\n", e->num_of_gpus);
+	plugin_log_msg("Number of GPUs:%d\n", e->num_of_gpus);
 
 	/* Add private data obtained from IOCTL for each GPU */
 	for (i = 0; i < args.num_objects; i++) {
@@ -496,7 +507,7 @@ static int dump_bos(int fd, struct kfd_ioctl_criu_process_info_args *info_args, 
 			priv_data + bo_bucket->priv_data_offset,
 			boinfo->private_data.len);
 
-		pr_info("BO [%d] gpu_id:%x addr:%llx size:%llx offset:%llx dmabuf_fd:%d\n",
+		plugin_log_msg("BO [%d] gpu_id:%x addr:%llx size:%llx offset:%llx dmabuf_fd:%d\n",
 					i,
 					bo_bucket->gpu_id,
 					bo_bucket->addr,
@@ -958,7 +969,7 @@ static int restore_bos(int fd, CriuKfd *e)
 		bo_bucket->offset = bo_entry->offset;
 		bo_bucket->alloc_flags = bo_entry->alloc_flags;
 
-		pr_info("BO [%d] gpu_id:%x addr:%llx size:%llx offset:%llx\n",
+		plugin_log_msg("BO [%d] gpu_id:%x addr:%llx size:%llx offset:%llx\n",
 					i,
 					bo_bucket->gpu_id,
 					bo_bucket->addr,
@@ -993,6 +1004,14 @@ static int restore_bos(int fd, CriuKfd *e)
 			vma_md->old_pgoff = bo_bucket->offset;
 			vma_md->vma_entry = bo_bucket->addr;
 			vma_md->new_pgoff = bo_bucket->restored_offset;
+
+			plugin_log_msg("amdgpu_plugin: adding vma_entry:addr:0x%lx old-off:0x%lx "
+				       "new_off:0x%lx new_minor:%d\n",
+					vma_md->vma_entry,
+					vma_md->old_pgoff,
+					vma_md->new_pgoff,
+					vma_md->new_minor);
+
 			list_add_tail(&vma_md->list, &update_vma_info_list);
 		}
 
@@ -1002,7 +1021,7 @@ static int restore_bos(int fd, CriuKfd *e)
 			pr_info("amdgpu_plugin: Trying mmap in stage 2\n");
 			if (bo_bucket->alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC ||
 			    bo_bucket->alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT) {
-				pr_info("amdgpu_plugin: large bar write possible\n");
+				plugin_log_msg("amdgpu_plugin: large bar write possible\n");
 				addr = mmap(NULL,
 					    bo_bucket->size,
 					    PROT_WRITE,
@@ -1023,7 +1042,8 @@ static int restore_bos(int fd, CriuKfd *e)
 				 * on small pci bar GPUs or for Buffer Objects
 				 * that don't have HostAccess permissions.
 				 */
-				pr_info("amdgpu_plugin: using PROCPIDMEM to restore BO contents\n");
+				plugin_log_msg("amdgpu_plugin: using PROCPIDMEM to restore BO "
+					       "contents\n");
 				addr = mmap(NULL,
 					    bo_bucket->size,
 					    PROT_NONE,
@@ -1052,7 +1072,7 @@ static int restore_bos(int fd, CriuKfd *e)
 					goto exit;
 				}
 
-				pr_perror("Opened %s file for pid = %d", fname, e->pid);
+				plugin_log_msg("Opened %s file for pid = %d", fname, e->pid);
 				free(fname);
 
 				if (lseek(mem_fd, (off_t) addr, SEEK_SET) == -1) {
@@ -1062,7 +1082,7 @@ static int restore_bos(int fd, CriuKfd *e)
 					goto exit;
 				}
 
-				pr_perror("Attempt writing now");
+				plugin_log_msg("Attempt writing now");
 				if (write(mem_fd, bo_entry->rawdata.data, bo_entry->size)
 					!= bo_entry->size) {
 
@@ -1075,7 +1095,7 @@ static int restore_bos(int fd, CriuKfd *e)
 				close(mem_fd);
 			}
 		} else {
-			pr_info("Not a VRAM BO\n");
+			plugin_log_msg("Not a VRAM BO\n");
 			continue;
 		}
 	}
@@ -1240,7 +1260,7 @@ int amdgpu_plugin_restore_file(int id)
 		return -1;
 	}
 
-	pr_info("amdgpu_plugin: read image file data\n");
+	plugin_log_msg("amdgpu_plugin: read image file data\n");
 
 	ret = restore_process(fd, e);
 	if (ret)
@@ -1282,7 +1302,7 @@ int amdgpu_plugin_update_vmamap(const char *old_path, char *new_path, const uint
 {
 	struct vma_metadata *vma_md;
 
-	pr_info("amdgpu_plugin: Enter %s\n", __func__);
+	plugin_log_msg("amdgpu_plugin: Enter %s\n", __func__);
 
 	/* Once we support restoring on different nodes, new_path may be different from old_path
 	 * because the restored gpu may have a different minor number.
@@ -1295,8 +1315,9 @@ int amdgpu_plugin_update_vmamap(const char *old_path, char *new_path, const uint
 		if (addr == vma_md->vma_entry && old_offset == vma_md->old_pgoff) {
 			*new_offset = vma_md->new_pgoff;
 
-			pr_info("amdgpu_plugin: old_pgoff= 0x%lx new_pgoff = 0x%lx old_path = %s new_path = %s\n",
-				vma_md->old_pgoff, vma_md->new_pgoff, old_path, new_path);
+			plugin_log_msg("amdgpu_plugin: old_pgoff= 0x%lx new_pgoff = 0x%lx "
+					"old_path = %s new_path = %s\n",
+					vma_md->old_pgoff, vma_md->new_pgoff, old_path, new_path);
 
 			return 1;
 		}
