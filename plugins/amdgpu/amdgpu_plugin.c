@@ -78,6 +78,70 @@ int open_drm_render_device(int minor)
 	return fd;
 }
 
+int write_file(const char *file_path, const void *buf, const size_t buf_len)
+{
+	int fd;
+	FILE *fp;
+	size_t len_wrote;
+
+	fd = openat(criu_get_image_dir(), file_path, O_WRONLY | O_CREAT, 0600);
+	if (fd < 0) {
+		pr_perror("Cannot open %s", file_path);
+		return -errno;
+	}
+
+	fp = fdopen(fd, "w");
+	if (!fp) {
+		pr_perror("Cannot fdopen %s", file_path);
+		return -errno;
+	}
+
+	len_wrote = fwrite(buf, 1, buf_len, fp);
+	if (len_wrote != buf_len) {
+		pr_perror("Unable to write %s (wrote:%ld buf_len:%ld)",
+			   file_path, len_wrote, buf_len);
+		fclose(fp);
+		return -EIO;
+	}
+
+	pr_info("Wrote file:%s (%ld bytes)\n", file_path, buf_len);
+	/* this will also close fd */
+	fclose(fp);
+	return 0;
+}
+
+int read_file(const char *file_path, void *buf, const size_t buf_len)
+{
+	int fd;
+	FILE *fp;
+	size_t len_read;
+
+	fd = openat(criu_get_image_dir(), file_path, O_RDONLY);
+	if (fd < 0) {
+		pr_perror("Cannot open %s", file_path);
+		return -errno;
+	}
+
+	fp = fdopen(fd, "r");
+	if (!fp) {
+		pr_perror("Cannot fdopen %s", file_path);
+		return -errno;
+	}
+
+	len_read = fread(buf, 1, buf_len, fp);
+	if (len_read != buf_len) {
+		pr_perror("Unable to read %s", file_path);
+		fclose(fp);
+		return -EIO;
+	}
+
+	pr_info("Read file:%s (%ld bytes)\n", file_path, buf_len);
+
+	/* this will also close fd */
+	fclose(fp);
+	return 0;
+}
+
 /* Call ioctl, restarting if it is interrupted */
 int kmtIoctl(int fd, unsigned long request, void *arg)
 {
@@ -545,15 +609,7 @@ static int dump_bos(int fd, struct kfd_ioctl_criu_process_info_args *info_args, 
 				memcpy(boinfo->rawdata.data, addr, boinfo->size);
 				munmap(addr, boinfo->size);
 			} else {
-				uint8_t *local_buf;
 				int mem_fd;
-
-				local_buf = xmalloc(bo_bucket->size);
-				if (!local_buf) {
-					pr_err("failed to allocate memory for BO rawdata\n");
-					ret = -1;
-					goto exit;
-				}
 
 				pr_info("Now try reading BO contents with /proc/pid/mem\n");
 				if (asprintf(&fname, PROCPIDMEM, info_args->task_pid) < 0) {
@@ -568,7 +624,6 @@ static int dump_bos(int fd, struct kfd_ioctl_criu_process_info_args *info_args, 
 						  info_args->task_pid);
 					free(fname);
 					close(mem_fd);
-					xfree(local_buf);
 					ret = -1;
 					goto exit;
 				}
@@ -581,22 +636,20 @@ static int dump_bos(int fd, struct kfd_ioctl_criu_process_info_args *info_args, 
 					pr_perror("Can't lseek for bo_offset for pid = %d",
 						   info_args->task_pid);
 					close(mem_fd);
-					xfree(local_buf);
 					ret = -1;
 					goto exit;
 				}
 				pr_info("Try to read file now\n");
 
-				if (read(mem_fd, local_buf, boinfo->size) != boinfo->size) {
+				if (read(mem_fd, boinfo->rawdata.data, boinfo->size) !=
+					 boinfo->size) {
+
 					close(mem_fd);
-					xfree(local_buf);
 					pr_perror("Can't read buffer");
 					ret = -1;
 					goto exit;
 				}
 				close(mem_fd);
-				memcpy(boinfo->rawdata.data, (uint8_t *)local_buf, boinfo->size);
-				xfree(local_buf);
 			}
 		}
 	}
@@ -674,7 +727,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	struct stat st, st_kfd;
 	unsigned char *buf;
 	CriuKfd *e = NULL;
-	int img_fd = -1;
 	int ret = 0;
 	size_t len;
 
@@ -703,13 +755,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 									minor(st.st_rdev), fd, id);
 
 		rd.minor_number = minor(st.st_rdev);
-		snprintf(img_path, sizeof(img_path), "renderDXXX.%d.img", id);
-
-		img_fd = openat(criu_get_image_dir(), img_path, O_WRONLY | O_CREAT, 0600);
-		if (img_fd < 0) {
-			pr_perror("Can't open %s", img_path);
-			return -1;
-		}
 
 		len = criu_render_node__get_packed_size(&rd);
 		buf = xmalloc(len);
@@ -717,15 +762,15 @@ int amdgpu_plugin_dump_file(int fd, int id)
 			return -ENOMEM;
 
 		criu_render_node__pack(&rd, buf);
-		ret = write(img_fd,  buf, len);
 
-		if (ret != len) {
-			pr_perror("Unable to write in %s", img_path);
-			ret = -1;
+		snprintf(img_path, sizeof(img_path), "renderDXXX.%d.img", id);
+		ret = write_file(img_path,  buf, len);
+		if (ret) {
+			xfree(buf);
+			return ret;
 		}
-		xfree(buf);
-		close(img_fd);
 
+		xfree(buf);
 		/* Need to return success here so that criu can call plugins for renderD nodes */
 		return ret;
 	}
@@ -775,13 +820,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	snprintf(img_path, sizeof(img_path), "kfd.%d.img", id);
 	pr_info("amdgpu_plugin: img_path = %s\n", img_path);
 
-	img_fd = openat(criu_get_image_dir(), img_path, O_WRONLY | O_CREAT, 0600);
-	if (img_fd < 0) {
-		pr_perror("Can't open %s", img_path);
-		ret = -1;
-		goto exit;
-	}
-
 	len = criu_kfd__get_packed_size(e);
 
 	pr_info("amdgpu_plugin: Len = %ld\n", len);
@@ -795,12 +833,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 
 	criu_kfd__pack(e, buf);
 
-	ret = write(img_fd, buf, len);
-	if (ret != len) {
-		pr_perror("Unable to write in %s", img_path);
-		ret = -1;
-		goto exit;
-	}
+	ret = write_file(img_path,  buf, len);
 
 	xfree(buf);
 exit:
@@ -808,8 +841,6 @@ exit:
 	pause_process(fd, false);
 
 	free_e(e);
-	if (img_fd >= 0)
-		close(img_fd);
 
 	if (ret)
 		pr_err("amdgpu_plugin: Failed to dump (ret:%d)\n", ret);
@@ -935,7 +966,6 @@ static int restore_bos(int fd, CriuKfd *e)
 	uint8_t *priv_data;
 	int ret = 0;
 	char *fname;
-	int mem_fd;
 	void *addr;
 	int drm_fd;
 
@@ -1038,6 +1068,7 @@ static int restore_bos(int fd, CriuKfd *e)
 				memcpy(addr, (void *)bo_entry->rawdata.data, bo_entry->size);
 				munmap(addr, bo_entry->size);
 			} else {
+				int mem_fd;
 				/* Use indirect host data path via /proc/pid/mem
 				 * on small pci bar GPUs or for Buffer Objects
 				 * that don't have HostAccess permissions.
@@ -1161,20 +1192,18 @@ exit:
 
 int amdgpu_plugin_restore_file(int id)
 {
-	int ret = 0, fd, len;
+	int ret = 0, fd;
 	char img_path[PATH_MAX];
 	struct stat filestat;
 	unsigned char *buf;
 	CriuRenderNode *rd;
 	CriuKfd *e = NULL;
-	int img_fd;
 
 	pr_info("amdgpu_plugin: Initialized kfd plugin restorer with ID = %d\n", id);
 
 	snprintf(img_path, sizeof(img_path), "kfd.%d.img", id);
 
-	img_fd = openat(criu_get_image_dir(), img_path, O_RDONLY, 0600);
-	if (img_fd < 0) {
+	if (stat(img_path, &filestat) == -1) {
 		pr_perror("open(%s)", img_path);
 		/* This is restorer plugin for renderD nodes. Since criu doesn't
 		 * gurantee that they will be called before the plugin is called
@@ -1184,11 +1213,6 @@ int amdgpu_plugin_restore_file(int id)
 		 * restore both, the kfd plugin gets called first.
 		 */
 		snprintf(img_path, sizeof(img_path), "renderDXXX.%d.img", id);
-		img_fd = openat(criu_get_image_dir(), img_path, O_RDONLY, 0600);
-		if (img_fd < 0) {
-			pr_perror("open(%s)", img_path);
-			return -ENOTSUP;
-		}
 
 		if (stat(img_path, &filestat) == -1) {
 			pr_perror("Failed to read file stats");
@@ -1202,16 +1226,13 @@ int amdgpu_plugin_restore_file(int id)
 			return -ENOMEM;
 		}
 
-		len = read(img_fd, buf, filestat.st_size);
-		if (len <= 0) {
+		if (read_file(img_path, buf, filestat.st_size)) {
 			pr_perror("Unable to read from %s", img_path);
 			xfree(buf);
-			close(img_fd);
 			return -1;
 		}
-		close(img_fd);
 
-		rd = criu_render_node__unpack(NULL, len, buf);
+		rd = criu_render_node__unpack(NULL, filestat.st_size, buf);
 		if (rd == NULL) {
 			pr_perror("Unable to parse the KFD message %d", id);
 			xfree(buf);
@@ -1233,27 +1254,20 @@ int amdgpu_plugin_restore_file(int id)
 
 	pr_info("amdgpu_plugin: Opened kfd, fd = %d\n", fd);
 
-	if (stat(img_path, &filestat) == -1) {
-		pr_perror("Failed to read file stats");
-		return -1;
-	}
 	pr_info("kfd img file size on disk = %ld\n", filestat.st_size);
 
 	buf = xmalloc(filestat.st_size);
 	if (!buf) {
 		pr_perror("Failed to allocate memory");
-		close(img_fd);
 		return -ENOMEM;
 	}
-	len = read(img_fd, buf, filestat.st_size);
-	if (len <= 0) {
+
+	if (read_file(img_path, buf, filestat.st_size)) {
 		pr_perror("Unable to read from %s", img_path);
 		xfree(buf);
-		close(img_fd);
 		return -1;
 	}
-	close(img_fd);
-	e = criu_kfd__unpack(NULL, len, buf);
+	e = criu_kfd__unpack(NULL, filestat.st_size, buf);
 	if (e == NULL) {
 		pr_err("Unable to parse the KFD message %#x\n", id);
 		xfree(buf);
