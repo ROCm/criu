@@ -1111,6 +1111,63 @@ bool match_xgmi_groups(struct tp_system *src_sys, struct tp_system *dest_sys,
 	return false;
 }
 
+/* return 1  	 if gpu override is set
+ * return 0  	 if no gpu overide
+ * return -errno if failed to set gpu override */
+int get_user_gpu_override(struct tp_system *src_sys, struct tp_system *dest_sys,
+			  struct device_maps *maps)
+{
+	char *token;
+	int index = 0;
+	char *gpu_str = kfd_gpu_override;
+	struct tp_node *src_node, *dest_node;
+
+	/* Expected destination gpu formats:
+	*      KFD_DESTINATION_GPUS=0xff31,0x90db
+	*      KFD_DESTINATION_GPUS=65329,37083
+	*      KFD_DESTINATION_GPUS=renderD129,renderD128 */
+	if (!gpu_str)
+		return 0;
+
+	pr_info("amdgpu_plugin: Destination GPU's override:%s\n", gpu_str);
+
+	token = strtok(gpu_str, ",");
+	while (token) {
+		uint32_t dev_minor=0, gpu_id = 0;
+		if (sscanf(token, "renderD%d", &dev_minor) == 1) {
+			dest_node = sys_get_node_by_render_minor(dest_sys, dev_minor);
+			gpu_id = dest_node->gpu_id;
+		} else if (sscanf(token, "0x%x", &gpu_id) == 1 || sscanf(token, "%u", &gpu_id) == 1)
+			dest_node = sys_get_node_by_gpu_id(dest_sys, gpu_id);
+
+		if (dest_node) {
+			struct device_maps new_maps;
+			maps_init(&new_maps);
+
+			/* Ignore extra GPU's */
+			if (index >= dest_sys->num_nodes)
+				break;
+
+			src_node = sys_get_node_by_gpu_index(src_sys, index);
+			if (kfd_topology_check &&
+			    !map_device(src_sys, dest_sys, src_node, dest_node, maps, &new_maps)) {
+				pr_err("Local gpu_id = 0x%04x not compatible\n", gpu_id);
+				return -EINVAL;
+			}
+
+			if (maps_append(maps, &new_maps))
+				return -EINVAL;
+
+			index++;
+		} else {
+			pr_err("amdgpu_plugin:Failed to parse destination GPU's: %s", gpu_str);
+			return -1;
+		}
+		token = strtok(NULL, ",");
+	}
+	return 1;
+}
+
 int set_restore_gpu_maps(struct tp_system *src_sys, struct tp_system *dest_sys,
 			 struct device_maps *maps)
 {
