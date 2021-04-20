@@ -1,6 +1,9 @@
 #ifndef __KFD_PLUGIN_TOPOLOGY_H__
 #define __KFD_PLUGIN_TOPOLOGY_H__
 
+#define DRM_FIRST_RENDER_NODE 128
+#define DRM_LAST_RENDER_NODE  255
+
 #define TOPO_HEAP_TYPE_PUBLIC  1 /* HSA_HEAPTYPE_FRAME_BUFFER_PUBLIC */
 #define TOPO_HEAP_TYPE_PRIVATE 2 /* HSA_HEAPTYPE_FRAME_BUFFER_PRIVATE */
 
@@ -62,6 +65,8 @@ struct tp_node {
 
 	uint32_t num_valid_iolinks;
 	struct list_head iolinks;
+
+	int drm_fd;
 };
 
 struct tp_p2pgroup {
