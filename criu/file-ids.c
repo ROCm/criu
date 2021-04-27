@@ -18,6 +18,7 @@
 #include "util.h"
 #include "irmap.h"
 #include "files.h"
+#include "plugin.h"
 
 DECLARE_KCMP_TREE(fd_tree, KCMP_FILE);
 
@@ -77,11 +78,18 @@ int fd_id_generate_special(struct fd_parms *p, u32 *id)
 {
 	if (p) {
 		struct fd_id *fi;
+		struct stat st_kfd;
 
 		fi = fd_id_cache_lookup(p);
 		if (fi) {
-			*id = fi->id;
-			return 0;
+			if (stat(AMDGPU_KFD_DEVICE, &st_kfd) == -1) {
+				*id = fi->id;
+				return 0;
+			} else {
+				/* Don't cache the id */
+				*id = fd_tree.subid++;
+				return 1;
+			}
 		}
 	}
 
