@@ -6,6 +6,7 @@
 #include "common/list.h"
 
 #define CR_PLUGIN_DEFAULT "/var/lib/criu/"
+#define AMDGPU_KFD_DEVICE "/dev/kfd"
 
 void cr_plugin_fini(int stage, int err);
 int cr_plugin_init(int stage);
