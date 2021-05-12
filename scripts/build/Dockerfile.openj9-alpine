@@ -19,10 +19,12 @@ RUN apk update && apk add \
 	maven \
 	ip6tables \
 	iptables \
-	bash
+	bash \
+	libdrm-dev
 
 COPY . /criu
 WORKDIR /criu
+RUN mkdir -p /usr/include/drm && cp -r /usr/include/libdrm/* /usr/include/drm
 
 RUN make mrproper && make -j $(nproc) CC="$CC"
 

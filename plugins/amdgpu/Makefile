@@ -3,14 +3,21 @@ PLUGIN_SOBJ		:= amdgpu_plugin.so
 
 PLUGIN_INC		:= ../../../criu/include
 PLUGIN_INC_EXTRA	:= ../../criu/include
-PLUGIN_INCLUDE		:= -iquote$(PLUGIN_INC) -iquote $(PLUGIN_INC_EXTRA)
+PLUGIN_INCLUDE		:= -iquote$(PLUGIN_INC) -iquote$(PLUGIN_INC_EXTRA)
+LIBDRM_INC             := -I/usr/include/libdrm
+DEPS_OK 		:= amdgpu_plugin.so
+DEPS_NOK 		:= ;
 
 include $(__nmk_dir)msg.mk
 
 CC      		:= gcc
 PLUGIN_CFLAGS  		:= -g -Wall -Werror -D _GNU_SOURCE -shared -nostartfiles -fPIC
 
-all: amdgpu_plugin.so
+ifeq ($(CONFIG_AMDGPU),y)
+        all: $(DEPS_OK)
+else
+        all: $(DEPS_NOK)
+endif
 
 criu-amdgpu.pb-c.c: criu-amdgpu.proto
 		protoc-c --proto_path=. --c_out=. criu-amdgpu.proto
