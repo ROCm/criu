@@ -298,6 +298,10 @@ clean-top:
 
 clean: clean-top
 
+clean-kfd_plugin:
+	$(Q) $(MAKE) -C plugins clean
+.PHONY: clean-kfd_plugin
+
 mrproper-top: clean-top
 	$(Q) $(RM) $(CONFIG_HEADER)
 	$(Q) $(RM) $(VERSION_HEADER)
@@ -325,6 +329,10 @@ zdtm: all
 test: zdtm
 	$(Q) $(MAKE) -C test
 .PHONY: test
+
+kfd_plugin: all
+	$(Q) $(MAKE) -C plugins all
+.PHONY: plugins
 
 #
 # Generating tar requires tag matched CRIU_VERSION.
@@ -403,6 +411,7 @@ help:
 	@echo '      cscope          - Generate cscope database'
 	@echo '      test            - Run zdtm test-suite'
 	@echo '      gcov            - Make code coverage report'
+	@echo '      kfd_plugin      - Make AMD KFD plugin'
 .PHONY: help
 
 lint:

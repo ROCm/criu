@@ -40,6 +40,10 @@ install-criu: criu
 	$(Q) $(MAKE) $(build)=criu install
 .PHONY: install-criu
 
+install-kfd_plugin: all
+	$(Q) $(MAKE) -C plugins install
+.PHONY: install-kfd_plugin
+
 install-compel: $(compel-install-targets)
 	$(Q) $(MAKE) $(build)=compel install
 	$(Q) $(MAKE) $(build)=compel/plugins install
