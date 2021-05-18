@@ -450,7 +450,7 @@ void getenv_bool(const char *var, bool *value)
 			pr_err("Ignoring invalid value for %s=%s, expecting (YES/NO)\n",
 				var, value_str);
 	}
-	pr_info("param: %s:%s", var, *value ? "Y" : "N");
+	pr_info("param: %s:%s\n", var, *value ? "Y" : "N");
 	return;
 }
 
