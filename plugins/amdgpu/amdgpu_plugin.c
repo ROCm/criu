@@ -536,6 +536,7 @@ struct thread_data {
 	pid_t pid;
 	struct kfd_criu_bo_buckets *bo_buckets;
 	BoEntriesTest **bo_info_test;
+	__u64 *restored_bo_offsets;
 	int drm_fd;
 	int ret;
 };
@@ -612,6 +613,110 @@ void *dump_bo_contents(void *_thread_data)
 				goto exit;
 			}
 		} /* PROCPIDMEM read done */
+	}
+
+exit:
+	pr_info("amdgpu_plugin: Thread[0x%x] done num_bos:%d ret:%d\n",
+			thread_data->gpu_id, num_bos, ret);
+
+	if (mem_fd >= 0)
+		close(mem_fd);
+	thread_data->ret = ret;
+	return NULL;
+};
+
+void *restore_bo_contents(void *_thread_data)
+{
+	int i, ret = 0;
+	int num_bos = 0;
+	struct thread_data* thread_data = (struct thread_data*) _thread_data;
+	struct kfd_criu_bo_buckets *bo_buckets = thread_data->bo_buckets;
+	BoEntriesTest **bo_info_test = thread_data->bo_info_test;
+	__u64 *restored_bo_offsets_array = thread_data->restored_bo_offsets;
+	char *fname;
+	int mem_fd = -1;
+
+	pr_info("amdgpu_plugin: Thread[0x%x] started\n", thread_data->gpu_id);
+
+	if (asprintf (&fname, PROCPIDMEM, thread_data->pid) < 0) {
+		pr_perror("failed in asprintf, %s\n", fname);
+		ret = -1;
+		goto exit;
+	}
+
+	mem_fd = open (fname, O_RDWR);
+	if (mem_fd < 0) {
+		pr_perror("Can't open %s for pid %d\n", fname, thread_data->pid);
+		free (fname);
+		ret = -1;
+		goto exit;
+	}
+	plugin_log_msg("Opened %s file for pid = %d\n", fname, thread_data->pid);
+	free (fname);
+
+	for (i = 0; i < thread_data->num_of_bos; i++) {
+		void *addr;
+		if (bo_buckets[i].gpu_id != thread_data->gpu_id)
+			continue;
+
+		num_bos++;
+
+		if (!(bo_buckets[i].bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) &&
+			!(bo_buckets[i].bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
+			continue;
+
+		if (bo_info_test[i]->bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC) {
+
+			plugin_log_msg("amdgpu_plugin: large bar write possible\n");
+
+			addr = mmap(NULL,
+					bo_buckets[i].bo_size,
+					PROT_WRITE,
+					MAP_SHARED,
+					thread_data->drm_fd,
+					restored_bo_offsets_array[i]);
+			if (addr == MAP_FAILED) {
+				pr_perror("amdgpu_plugin: mmap failed\n");
+				ret = -1;
+				goto exit;
+			}
+
+			/* direct memcpy is possible on large bars */
+			memcpy(addr, (void *)bo_info_test[i]->bo_rawdata.data, bo_info_test[i]->bo_size);
+			munmap(addr, bo_info_test[i]->bo_size);
+		} else {
+			/* Use indirect host data path via /proc/pid/mem on small pci bar GPUs or
+			 * for Buffer Objects that don't have HostAccess permissions.
+			 */
+			plugin_log_msg("amdgpu_plugin: using PROCPIDMEM to restore BO contents\n");
+			addr = mmap(NULL,
+				    bo_info_test[i]->bo_size,
+				    PROT_NONE,
+				    MAP_SHARED,
+				    thread_data->drm_fd,
+				    restored_bo_offsets_array[i]);
+
+			if (addr == MAP_FAILED) {
+				pr_perror("amdgpu_plugin: mmap failed\n");
+				ret = -1;
+				goto exit;
+			}
+
+			if (lseek (mem_fd, (off_t) addr, SEEK_SET) == -1) {
+				pr_perror("Can't lseek for bo_offset for pid = %d\n", thread_data->pid);
+				ret = -1;
+				goto exit;
+			}
+
+			plugin_log_msg("Attempt writting now\n");
+			if (write(mem_fd, bo_info_test[i]->bo_rawdata.data, bo_info_test[i]->bo_size) !=
+			    bo_info_test[i]->bo_size) {
+				pr_perror("Can't write buffer\n");
+				ret = -1;
+				goto exit;
+			}
+			munmap(addr, bo_info_test[i]->bo_size);
+		}
 	}
 
 exit:
@@ -1052,9 +1157,9 @@ int amdgpu_plugin_restore_file(int id)
 	struct stat filestat;
 	unsigned char *buf;
 	CriuRenderNode *rd;
-	char *fname;
 	CriuKfd *e;
-	void *addr;
+	struct thread_data thread_datas[NUM_OF_SUPPORTED_GPUS];
+	memset(thread_datas, 0, sizeof(thread_datas));
 
 	pr_info("amdgpu_plugin: Initialized kfd plugin restorer with ID = %d\n", id);
 
@@ -1454,115 +1559,40 @@ fail:
 
 			list_add_tail(&vma_md->list, &update_vma_info_list);
 		}
-
-		if (e->bo_info_test[i]->bo_alloc_flags &
-			(KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_GTT)) {
-
-			int j;
-			int drm_render_fd = -EBADFD;
-
-			for (j = 0; j < e->num_of_gpus; j++) {
-				if (devinfo_bucket_ptr[j].actual_gpu_id == bo_bucket_ptr[i].gpu_id) {
-					drm_render_fd = devinfo_bucket_ptr[j].drm_fd;
-					break;
-				}
-			}
-
-			if (drm_render_fd < 0) {
-				pr_err("amdgpu_plugin: bad fd for render node\n");
-				fd = -EBADFD;
-				goto clean;
-			}
-
-			plugin_log_msg("amdgpu_plugin: Trying mmap in stage 2\n");
-			if ((e->bo_info_test[i])->bo_alloc_flags &
-			    KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC ||
-			    (e->bo_info_test[i])->bo_alloc_flags &
-			    KFD_IOC_ALLOC_MEM_FLAGS_GTT ) {
-				plugin_log_msg("amdgpu_plugin: large bar write possible\n");
-				addr = mmap(NULL,
-					    (e->bo_info_test[i])->bo_size,
-					    PROT_WRITE,
-					    MAP_SHARED,
-					    drm_render_fd,
-					    restored_bo_offsets_array[i]);
-				if (addr == MAP_FAILED) {
-					pr_perror("amdgpu_plugin: mmap failed\n");
-					fd = -EBADFD;
-					goto clean;
-				}
-
-				/* direct memcpy is possible on large bars */
-				memcpy(addr, (void *)e->bo_info_test[i]->bo_rawdata.data,
-				       (e->bo_info_test[i])->bo_size);
-				munmap(addr, e->bo_info_test[i]->bo_size);
-			} else {
-				int mem_fd;
-				/* Use indirect host data path via /proc/pid/mem
-				 * on small pci bar GPUs or for Buffer Objects
-				 * that don't have HostAccess permissions.
-				 */
-				plugin_log_msg("amdgpu_plugin: using PROCPIDMEM to restore BO contents\n");
-				addr = mmap(NULL,
-					    (e->bo_info_test[i])->bo_size,
-					    PROT_NONE,
-					    MAP_SHARED,
-					    drm_render_fd,
-					    restored_bo_offsets_array[i]);
-				if (addr == MAP_FAILED) {
-					pr_perror("amdgpu_plugin: mmap failed\n");
-					fd = -EBADFD;
-					goto clean;
-				}
-
-				if (asprintf (&fname, PROCPIDMEM, e->pid) < 0) {
-					pr_perror("failed in asprintf, %s\n", fname);
-					munmap(addr, e->bo_info_test[i]->bo_size);
-					fd = -EBADFD;
-					goto clean;
-				}
-
-				mem_fd = open (fname, O_RDWR);
-				if (mem_fd < 0) {
-					pr_perror("Can't open %s for pid %d\n", fname, e->pid);
-					free (fname);
-					munmap(addr, e->bo_info_test[i]->bo_size);
-					fd = -EBADFD;
-					goto clean;
-				}
-
-				plugin_log_msg("Opened %s file for pid = %d\n", fname, e->pid);
-				free (fname);
-
-				if (lseek (mem_fd, (off_t) addr, SEEK_SET) == -1) {
-					pr_perror("Can't lseek for bo_offset for pid = %d\n", e->pid);
-					munmap(addr, e->bo_info_test[i]->bo_size);
-					fd = -EBADFD;
-					goto clean;
-				}
-
-				plugin_log_msg("Attempt writting now\n");
-				if (write(mem_fd, e->bo_info_test[i]->bo_rawdata.data,
-					  (e->bo_info_test[i])->bo_size) !=
-				    (e->bo_info_test[i])->bo_size) {
-					pr_perror("Can't write buffer\n");
-					munmap(addr, e->bo_info_test[i]->bo_size);
-					fd = -EBADFD;
-					goto clean;
-				}
-				munmap(addr, e->bo_info_test[i]->bo_size);
-				close(mem_fd);
-			}
-		} else {
-			pr_info("Not a VRAM BO\n");
-			continue;
-		}
 	} /* mmap done for VRAM BO */
 
 	for (int i = 0; i < e->num_of_gpus; i++) {
+		int ret_thread = 0;
+
+		thread_datas[i].gpu_id = devinfo_bucket_ptr[i].actual_gpu_id;
+		thread_datas[i].bo_buckets = bo_bucket_ptr;
+		thread_datas[i].bo_info_test = e->bo_info_test;
+		thread_datas[i].pid = e->pid;
+		thread_datas[i].num_of_bos = e->num_of_bos;
+		thread_datas[i].restored_bo_offsets = restored_bo_offsets_array;
+		thread_datas[i].drm_fd = devinfo_bucket_ptr[i].drm_fd;
+
+		ret_thread = pthread_create(&thread_datas[i].thread, NULL, restore_bo_contents, (void*) &thread_datas[i]);
+		if (ret_thread) {
+			pr_err("Failed to create thread[%i]\n", i);
+			fd = -EBADFD;
+			goto clean;
+		}
+	}
+
+	for (int i = 0; i < e->num_of_gpus; i++) {
+		pthread_join(thread_datas[i].thread, NULL);
+		pr_info("Thread[0x%x] finished ret:%d\n", thread_datas[i].gpu_id, thread_datas[i].ret);
+
 		if (devinfo_bucket_ptr[i].drm_fd >= 0)
 			close(devinfo_bucket_ptr[i].drm_fd);
+
+		if (thread_datas[i].ret) {
+			fd = -EBADFD;
+			goto clean;
+		}
 	}
+
 clean:
 	xfree(devinfo_bucket_ptr);
 	if (ev_bucket_ptr)
