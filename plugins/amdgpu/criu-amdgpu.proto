@@ -48,7 +48,6 @@ message bo_entries_test {
 	required uint32 gpu_id = 5;
 	required uint32 idr_handle = 6;
 	required uint64 user_addr = 7;
-	required bytes bo_rawdata = 8;
 }
 
 message q_entry {
