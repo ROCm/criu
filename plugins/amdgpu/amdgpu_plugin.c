@@ -532,6 +532,7 @@ struct thread_data {
 	pthread_t thread;
 	uint64_t num_of_bos;
 	uint32_t gpu_id;
+	uint32_t user_gpu_id;
 	pid_t pid;
 	struct kfd_criu_bo_buckets *bo_buckets;
 	BoEntriesTest **bo_info_test;
@@ -549,11 +550,20 @@ void *dump_bo_contents(void *_thread_data)
 	BoEntriesTest **bo_info_test = thread_data->bo_info_test;
 	char *fname;
 	FILE *mem_fp = NULL;
+	FILE *bo_contents_fp = NULL;
 	uint8_t *buffer = NULL;
-	char img_path[20];
+	char img_path[30];
 	size_t max_bo_size = 0;
 
 	pr_info("amdgpu_plugin: Thread[0x%x] started\n", thread_data->gpu_id);
+
+	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%04x.img", thread_data->user_gpu_id);
+	bo_contents_fp = fopen(img_path, "w");
+	if (!bo_contents_fp) {
+		pr_perror("Cannot fopen %s\n", img_path);
+		ret = -1;
+		goto exit;
+	}
 
 	/* Allocate buffer to fit biggest BO */
 	for (i = 0; i < thread_data->num_of_bos; i++) {
@@ -630,8 +640,8 @@ void *dump_bo_contents(void *_thread_data)
 			if (ret)
 				goto exit;
 		} /* PROCPIDMEM read done */
-		snprintf(img_path, sizeof(img_path), "amdgpu-bo-%d.img", i);
-		ret = write_file(img_path, buffer, bo_info_test[i]->bo_size);
+
+		ret = write_fp(bo_contents_fp, buffer, bo_info_test[i]->bo_size);
 		if (ret) {
 			ret = -1;
 			goto exit;
@@ -642,6 +652,8 @@ exit:
 	pr_info("amdgpu_plugin: Thread[0x%x] done num_bos:%d ret:%d\n",
 			thread_data->gpu_id, num_bos, ret);
 
+	if (bo_contents_fp)
+		fclose(bo_contents_fp);
 	if (mem_fp)
 		fclose(mem_fp);
 	if (buffer)
@@ -660,11 +672,20 @@ void *restore_bo_contents(void *_thread_data)
 	__u64 *restored_bo_offsets_array = thread_data->restored_bo_offsets;
 	char *fname;
 	FILE* mem_fp = NULL;
+	FILE *bo_contents_fp = NULL;
 	uint8_t *buffer = NULL;
-	char img_path[20];
+	char img_path[30];
 	size_t max_bo_size = 0;
 
 	pr_info("amdgpu_plugin: Thread[0x%x] started\n", thread_data->gpu_id);
+
+	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%04x.img", thread_data->user_gpu_id);
+	bo_contents_fp = fopen(img_path, "r");
+	if (!bo_contents_fp) {
+		pr_perror("Cannot fopen %s\n", img_path);
+		ret = -1;
+		goto exit;
+	}
 
 	/* Allocate buffer to fit biggest BO */
 	for (i = 0; i < thread_data->num_of_bos; i++) {
@@ -710,8 +731,7 @@ void *restore_bo_contents(void *_thread_data)
 			!(bo_buckets[i].bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
 			continue;
 
-		snprintf(img_path, sizeof(img_path), "amdgpu-bo-%d.img", i);
-		ret = read_file(img_path, buffer, bo_info_test[i]->bo_size);
+		ret = read_fp(bo_contents_fp, buffer, bo_info_test[i]->bo_size);
 		if (ret)
 			goto exit;
 
@@ -771,6 +791,8 @@ exit:
 	pr_info("amdgpu_plugin: Thread[0x%x] done num_bos:%d ret:%d\n",
 			thread_data->gpu_id, num_bos, ret);
 
+	if (bo_contents_fp)
+		fclose(bo_contents_fp);
 	if (mem_fp)
 		fclose(mem_fp);
 	if (buffer)
@@ -1015,6 +1037,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 		struct tp_node *dev;
 		int ret_thread = 0;
 		thread_datas[i].gpu_id = devinfo_bucket_ptr[i].actual_gpu_id;
+		thread_datas[i].user_gpu_id = devinfo_bucket_ptr[i].user_gpu_id;
 		thread_datas[i].bo_buckets = bo_bucket_ptr;
 		thread_datas[i].bo_info_test = e->bo_info_test;
 		thread_datas[i].pid = e->pid;
@@ -1615,6 +1638,7 @@ fail:
 		int ret_thread = 0;
 
 		thread_datas[i].gpu_id = devinfo_bucket_ptr[i].actual_gpu_id;
+		thread_datas[i].user_gpu_id = devinfo_bucket_ptr[i].user_gpu_id;
 		thread_datas[i].bo_buckets = bo_bucket_ptr;
 		thread_datas[i].bo_info_test = e->bo_info_test;
 		thread_datas[i].pid = e->pid;
