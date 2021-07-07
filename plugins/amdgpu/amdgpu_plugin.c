@@ -181,9 +181,14 @@ static void free_e(CriuKfd *e)
 	}
 
 	for (int i = 0; i < e->n_q_entries; i++) {
-		if (e->q_entries[i])
+		if (e->q_entries[i]) {
+			if (e->q_entries[i]->private_data.data)
+				xfree(e->q_entries[i]->private_data.data);
+
 			xfree(e->q_entries[i]);
+		}
 	}
+
 	for (int i = 0; i < e->n_ev_entries; i++) {
 		if (e->ev_entries[i])
 			xfree(e->ev_entries[i]);
@@ -1057,11 +1062,75 @@ exit:
 	return ret;
 }
 
+static int dump_queues(int fd, struct kfd_ioctl_criu_process_info_args *info_args, CriuKfd *e)
+{
+	struct kfd_ioctl_criu_dumper_args args = {0};
+	struct kfd_criu_queue_bucket *queue_buckets;
+	uint8_t *priv_data;
+	int ret = 0, i;
+
+	pr_debug("Dumping %d queues\n", info_args->total_queues);
+
+	if (!info_args->total_queues)
+		return 0;
+
+	ret = init_dumper_args(&args, KFD_CRIU_OBJECT_TYPE_QUEUE, 0, info_args->total_queues,
+			       (info_args->total_queues * sizeof(*queue_buckets)) +
+				info_args->queues_priv_data_size);
+
+	if (ret)
+		goto exit;
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_DUMPER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call dumper (queues) ioctl");
+		goto exit;
+	}
+
+	queue_buckets = (struct kfd_criu_queue_bucket*)args.objects;
+	/* First private data starts after all buckets */
+	priv_data = (uint8_t *)args.objects + (args.num_objects * sizeof(*queue_buckets));
+
+	e->num_of_queues = info_args->total_queues;
+	ret = allocate_q_entries(e, e->num_of_queues);
+	if (ret) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	for (i = 0; i < args.num_objects; i++) {
+		struct kfd_criu_queue_bucket *q_bucket = &queue_buckets[i];
+		QEntry *qinfo = e->q_entries[i];
+
+		plugin_log_msg("Queue [%d] gpu_id:%x\n", i, q_bucket->gpu_id);
+
+		qinfo->gpu_id = maps_get_dest_gpu(&checkpoint_maps, q_bucket->gpu_id);
+		if (!qinfo->gpu_id) {
+			ret = -ENODEV;
+			goto exit;
+		}
+
+		qinfo->private_data.len = q_bucket->priv_data_size;
+		qinfo->private_data.data = xmalloc(qinfo->private_data.len);
+
+		if (!qinfo->private_data.data) {
+			ret = -ENOMEM;
+			goto exit;
+		}
+		memcpy(qinfo->private_data.data,
+			priv_data + q_bucket->priv_data_offset,
+			qinfo->private_data.len);
+	}
+exit:
+	xfree((void*)args.objects);
+	pr_info("Dumped queues %s (ret:%d)\n", ret ? "failed" : "ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_dump_file(int fd, int id)
 {
 	struct kfd_ioctl_criu_process_info_args info_args = {0};
 	struct kfd_ioctl_criu_dumper_args args = {0};
-	struct kfd_criu_q_bucket *q_bucket_ptr;
 	struct kfd_criu_ev_bucket *ev_buckets_ptr = NULL;
 	int ret;
 	char img_path[PATH_MAX];
@@ -1150,27 +1219,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 			info_args.total_devices, info_args.total_bos, info_args.total_queues,
 			info_args.total_events, info_args.total_svm_ranges);
 
-	pr_info("amdgpu_plugin: num of queues = %u\n", helper_args.num_of_queues);
-
-	q_bucket_ptr = xmalloc(helper_args.num_of_queues * sizeof(*q_bucket_ptr));
-	if (!q_bucket_ptr) {
-		pr_perror("amdgpu_plugin: failed to allocate args for dumper ioctl\n");
-		return -1;
-	}
-
-	args.num_of_queues = helper_args.num_of_queues;
-	args.kfd_criu_q_buckets_ptr = (uintptr_t)q_bucket_ptr;
-
-	if (helper_args.queues_data_size) {
-		args.queues_data_ptr = (uintptr_t)xmalloc(helper_args.queues_data_size);
-		if (!args.queues_data_ptr) {
-			pr_perror("amdgpu_plugin: failed to allocate args for dumper ioctl\n");
-			return -1;
-		}
-		args.queues_data_size = helper_args.queues_data_size;
-		pr_info("amdgpu_plugin: queues data size:%llu\n", args.queues_data_size);
-	}
-
 	if (helper_args.num_of_events) {
 		ev_buckets_ptr = xmalloc(helper_args.num_of_events * sizeof(*ev_buckets_ptr));
 		args.num_of_events = helper_args.num_of_events;
@@ -1207,59 +1255,9 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	if (ret)
 		goto exit;
 
-	ret = allocate_q_entries(e, helper_args.num_of_queues);
+	ret = dump_queues(fd, &info_args, e);
 	if (ret)
-		return ret;
-
-	e->num_of_queues = helper_args.num_of_queues;
-
-	for (int i = 0; i < e->num_of_queues; i++)
-	{
-		uint8_t *queue_data_ptr = (uint8_t *)args.queues_data_ptr
-					+ q_bucket_ptr[i].queues_data_offset;
-
-		plugin_log_msg("Dumping Queue[%d]:\n", i);
-		plugin_log_msg("\tgpu_id:%x type:%x format:%x q_id:%x q_address:%llx ",
-			q_bucket_ptr[i].gpu_id,
-			q_bucket_ptr[i].type,
-			q_bucket_ptr[i].format,
-			q_bucket_ptr[i].q_id,
-			q_bucket_ptr[i].q_address);
-
-		e->q_entries[i]->gpu_id = maps_get_dest_gpu(&checkpoint_maps, q_bucket_ptr[i].gpu_id);
-		if (!e->q_entries[i]->gpu_id) {
-			ret = -ENODEV;
-			goto failed;
-		}
-
-		e->q_entries[i]->type = q_bucket_ptr[i].type;
-		e->q_entries[i]->format = q_bucket_ptr[i].format;
-		e->q_entries[i]->q_id = q_bucket_ptr[i].q_id;
-		e->q_entries[i]->q_address = q_bucket_ptr[i].q_address;
-		e->q_entries[i]->q_size = q_bucket_ptr[i].q_size;
-		e->q_entries[i]->priority = q_bucket_ptr[i].priority;
-		e->q_entries[i]->q_percent = q_bucket_ptr[i].q_percent;
-		e->q_entries[i]->read_ptr_addr = q_bucket_ptr[i].read_ptr_addr;
-		e->q_entries[i]->write_ptr_addr = q_bucket_ptr[i].write_ptr_addr;
-		e->q_entries[i]->doorbell_id = q_bucket_ptr[i].doorbell_id;
-		e->q_entries[i]->doorbell_off = q_bucket_ptr[i].doorbell_off;
-		e->q_entries[i]->is_gws = q_bucket_ptr[i].is_gws;
-		e->q_entries[i]->sdma_id = q_bucket_ptr[i].sdma_id;
-		e->q_entries[i]->eop_ring_buffer_address = q_bucket_ptr[i].eop_ring_buffer_address;
-		e->q_entries[i]->eop_ring_buffer_size = q_bucket_ptr[i].eop_ring_buffer_size;
-		e->q_entries[i]->ctx_save_restore_area_address = q_bucket_ptr[i].ctx_save_restore_area_address;
-		e->q_entries[i]->ctx_save_restore_area_size = q_bucket_ptr[i].ctx_save_restore_area_size;
-		e->q_entries[i]->ctl_stack_size = q_bucket_ptr[i].ctl_stack_size;
-
-		e->q_entries[i]->cu_mask.len = q_bucket_ptr[i].cu_mask_size;
-		e->q_entries[i]->cu_mask.data = queue_data_ptr;
-
-		e->q_entries[i]->mqd.len = q_bucket_ptr[i].mqd_size;
-		e->q_entries[i]->mqd.data = queue_data_ptr + q_bucket_ptr[i].cu_mask_size;
-
-		e->q_entries[i]->ctl_stack.len = q_bucket_ptr[i].ctl_stack_size;
-		e->q_entries[i]->ctl_stack.data = queue_data_ptr + q_bucket_ptr[i].cu_mask_size + q_bucket_ptr[i].mqd_size;
-	}
+		goto exit;
 
 	e->event_page_offset = args.event_page_offset;
 	pr_info("amdgpu_plugin: number of events:%d\n", args.num_of_events);
@@ -1342,7 +1340,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 exit:
 failed:
 	sys_close_drm_render_devices(&src_topology);
-	xfree(q_bucket_ptr);
 	if (ev_buckets_ptr)
 		xfree(ev_buckets_ptr);
 	free_e(e);
@@ -1615,11 +1612,67 @@ exit:
 	return ret;
 }
 
+static int restore_queues(int fd, CriuKfd *e)
+{
+	struct kfd_ioctl_criu_restorer_args args = {0};
+	struct kfd_criu_queue_bucket *q_buckets;
+	uint64_t priv_data_offset = 0;
+	uint64_t objects_size = 0;
+	uint8_t *priv_data;
+	int ret = 0;
+
+	if (!e->num_of_queues)
+		return 0;
+
+	pr_debug("Restoring %d queues\n", e->num_of_queues);
+
+	for (int i = 0; i < e->num_of_queues; i++)
+		objects_size += sizeof(*q_buckets) + e->q_entries[i]->private_data.len;
+
+	ret = init_restorer_args(&args, KFD_CRIU_OBJECT_TYPE_QUEUE, 0, e->num_of_queues, objects_size);
+	if (ret)
+		goto exit;
+
+	q_buckets = (struct kfd_criu_queue_bucket*) args.objects;
+	priv_data = (uint8_t *)args.objects + (args.num_objects * sizeof(*q_buckets));
+
+	for (int i = 0; i < args.num_objects; i++) {
+		struct kfd_criu_queue_bucket *q_bucket = &q_buckets[i];
+		QEntry *qinfo = e->q_entries[i];
+
+		q_bucket->priv_data_size = qinfo->private_data.len;
+		q_bucket->priv_data_offset = priv_data_offset;
+		priv_data_offset += q_bucket->priv_data_size;
+
+		memcpy(priv_data + q_bucket->priv_data_offset,
+		       qinfo->private_data.data,
+		       q_bucket->priv_data_size);
+
+		q_bucket->gpu_id = maps_get_dest_gpu(&restore_maps, qinfo->gpu_id);
+		if (!q_bucket->gpu_id) {
+			ret = -ENODEV;
+			goto exit;
+		}
+
+		plugin_log_msg("Queue [%d] gpu_id:%x\n", i, q_bucket->gpu_id);
+	}
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_RESTORER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call restorer (queues) ioctl");
+		goto exit;
+	}
+
+exit:
+	xfree((void*)args.objects);
+	pr_info("Restore queues %s (ret:%d)\n", ret ? "Failed" : "Ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_restore_file(int id)
 {
 	int ret = 0, fd;
 	struct kfd_ioctl_criu_restorer_args args = {0};
-	struct kfd_criu_q_bucket *q_bucket_ptr;
 	struct kfd_criu_ev_bucket *ev_bucket_ptr = NULL;
 	char img_path[PATH_MAX];
 	struct stat filestat;
@@ -1753,97 +1806,9 @@ fail:
 	if (ret)
 		goto exit;
 
-	q_bucket_ptr = xmalloc(e->num_of_queues * sizeof(*q_bucket_ptr));
-        if (!q_bucket_ptr) {
-               pr_perror("amdgpu_plugin: failed to allocate args for dumper ioctl\n");
-               return -1;
-	}
-
-	pr_info("Number of queues:%u\n", e->num_of_queues);
-
-	args.queues_data_size = 0;
-	for (int i = 0; i < e->num_of_queues; i++ ) {
-		args.queues_data_size += e->q_entries[i]->cu_mask.len
-					+ e->q_entries[i]->mqd.len
-					+ e->q_entries[i]->ctl_stack.len;
-	}
-
-	pr_info("Queues data size:%llu\n", args.queues_data_size);
-
-	args.queues_data_ptr = (uintptr_t)xmalloc(args.queues_data_size);
-	if (!args.queues_data_ptr) {
-		pr_perror("amdgpu_plugin: failed to allocate args for dumper ioctl\n");
-		return -1;
-	}
-
-	uint32_t queues_data_offset = 0;
-
-	for (int i = 0; i < e->num_of_queues; i++ )
-	{
-		uint8_t *queue_data;
-		plugin_log_msg("Restoring Queue[%d]:\n", i);
-		plugin_log_msg("\tgpu_id:%x type:%x format:%x q_id:%x q_address:%lx "
-			"cu_mask_size:%lx mqd_size:%lx ctl_stack_size:%lx\n",
-			e->q_entries[i]->gpu_id,
-			e->q_entries[i]->type,
-			e->q_entries[i]->format,
-			e->q_entries[i]->q_id,
-			e->q_entries[i]->q_address,
-			e->q_entries[i]->cu_mask.len,
-			e->q_entries[i]->mqd.len,
-			e->q_entries[i]->ctl_stack.len);
-
-		q_bucket_ptr[i].gpu_id = maps_get_dest_gpu(&restore_maps, e->q_entries[i]->gpu_id);
-		if (!q_bucket_ptr[i].gpu_id) {
-			fd = -ENODEV;
-			goto clean;
-		}
-
-		q_bucket_ptr[i].type = e->q_entries[i]->type;
-		q_bucket_ptr[i].format = e->q_entries[i]->format;
-		q_bucket_ptr[i].q_id = e->q_entries[i]->q_id;
-		q_bucket_ptr[i].q_address = e->q_entries[i]->q_address;
-		q_bucket_ptr[i].q_size = e->q_entries[i]->q_size;
-		q_bucket_ptr[i].priority = e->q_entries[i]->priority;
-		q_bucket_ptr[i].q_percent = e->q_entries[i]->q_percent;
-		q_bucket_ptr[i].read_ptr_addr = e->q_entries[i]->read_ptr_addr;
-		q_bucket_ptr[i].write_ptr_addr = e->q_entries[i]->write_ptr_addr;
-		q_bucket_ptr[i].doorbell_id = e->q_entries[i]->doorbell_id;
-		q_bucket_ptr[i].doorbell_off = e->q_entries[i]->doorbell_off;
-		q_bucket_ptr[i].is_gws = e->q_entries[i]->is_gws;
-		q_bucket_ptr[i].sdma_id = e->q_entries[i]->sdma_id;
-		q_bucket_ptr[i].eop_ring_buffer_address = e->q_entries[i]->eop_ring_buffer_address;
-		q_bucket_ptr[i].eop_ring_buffer_size = e->q_entries[i]->eop_ring_buffer_size;
-		q_bucket_ptr[i].ctx_save_restore_area_address = e->q_entries[i]->ctx_save_restore_area_address;
-		q_bucket_ptr[i].ctx_save_restore_area_size = e->q_entries[i]->ctx_save_restore_area_size;
-		q_bucket_ptr[i].ctl_stack_size = e->q_entries[i]->ctl_stack_size;
-
-		q_bucket_ptr[i].queues_data_offset = queues_data_offset;
-		queue_data = (uint8_t *)args.queues_data_ptr + queues_data_offset;
-
-		q_bucket_ptr[i].cu_mask_size = e->q_entries[i]->cu_mask.len;
-		memcpy(queue_data,
-			e->q_entries[i]->cu_mask.data,
-			e->q_entries[i]->cu_mask.len);
-
-		q_bucket_ptr[i].mqd_size = e->q_entries[i]->mqd.len;
-		memcpy(queue_data + e->q_entries[i]->cu_mask.len,
-			e->q_entries[i]->mqd.data,
-			e->q_entries[i]->mqd.len);
-
-		q_bucket_ptr[i].ctl_stack_size = e->q_entries[i]->ctl_stack.len;
-		memcpy(queue_data + e->q_entries[i]->cu_mask.len + e->q_entries[i]->mqd.len,
-			e->q_entries[i]->ctl_stack.data,
-			e->q_entries[i]->ctl_stack.len);
-
-		queues_data_offset += e->q_entries[i]->cu_mask.len
-					+ e->q_entries[i]->mqd.len
-					+ e->q_entries[i]->ctl_stack.len;
-
-	}
-
-	args.num_of_queues = e->num_of_queues;
-	args.kfd_criu_q_buckets_ptr = (uintptr_t)q_bucket_ptr;
+	ret = restore_queues(fd, e);
+	if (ret)
+		goto exit;
 
 	args.event_page_offset = e->event_page_offset;
 
@@ -1921,11 +1886,7 @@ exit:
 	sys_close_drm_render_devices(&dest_topology);
 	if (ev_bucket_ptr)
 		xfree(ev_bucket_ptr);
-	if (q_bucket_ptr)
-		xfree(q_bucket_ptr);
 	xfree(buf);
-	if (args.queues_data_ptr)
-		xfree((void*)args.queues_data_ptr);
 
 	criu_kfd__free_unpacked(e, NULL);
 	pr_info("amdgpu_plugin: returning kfd fd from plugin, fd = %d\n", fd);
