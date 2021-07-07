@@ -1,15 +1,15 @@
 syntax = "proto2";
 
+message process_entry {
+	required bytes private_data = 1;
+}
+
 message dev_iolink {
 	required uint32 type = 1;
 	required uint32 node_to_id = 2;
 }
 
-message process_entry {
-	required bytes private_data = 1;
-}
-
-message devinfo_entry {
+message device_entry {
 	required uint32 node_id = 1;
 	required uint32 gpu_id = 2;
 	required uint32 cpu_cores_count = 3;
@@ -42,6 +42,7 @@ message devinfo_entry {
 	required uint32 vram_public = 30;
 	required uint64 vram_size = 31;
 	repeated dev_iolink iolinks = 32;
+	required bytes private_data = 33;
 }
 
 message bo_entries_test {
@@ -104,7 +105,7 @@ message criu_kfd {
 	required process_entry process_entry = 2;
 	required uint32 num_of_gpus = 3;
 	required uint32 num_of_cpus = 4;
-	repeated devinfo_entry devinfo_entries = 5;
+	repeated device_entry device_entries = 5;
 	required uint64	num_of_bos = 6;
 	repeated bo_entries_test bo_info_test = 7;
 	required uint32	num_of_queues = 8;

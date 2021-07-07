@@ -162,14 +162,19 @@ static void free_e(CriuKfd *e)
 		if (e->bo_info_test[i])
 			xfree(e->bo_info_test[i]);
 	}
-	for (int i = 0; i < e->n_devinfo_entries; i++) {
-		if (e->devinfo_entries[i]) {
-			for (int j = 0; j < e->devinfo_entries[i]->n_iolinks; j++)
-				xfree(e->devinfo_entries[i]->iolinks[j]);
 
-			xfree(e->devinfo_entries[i]);
+	for (int i = 0; i < e->n_device_entries; i++) {
+		if (e->device_entries[i]) {
+			if (e->device_entries[i]->private_data.data)
+				xfree(e->device_entries[i]->private_data.data);
+
+			for (int j = 0; j < e->device_entries[i]->n_iolinks; j++)
+				xfree(e->device_entries[i]->iolinks[j]);
+
+			xfree(e->device_entries[i]);
 		}
 	}
+
 	for (int i = 0; i < e->n_q_entries; i++) {
 		if (e->q_entries[i])
 			xfree(e->q_entries[i]);
@@ -201,27 +206,26 @@ static int allocate_process_entry(CriuKfd *e)
 	return 0;
 }
 
-static int allocate_devinfo_entries(CriuKfd *e, int num_of_devices)
+static int allocate_device_entries(CriuKfd *e, int num_of_devices)
 {
-	e->devinfo_entries = xmalloc(sizeof(DevinfoEntry*) * num_of_devices);
-	if (!e->devinfo_entries) {
-		pr_err("Failed to allocate devinfo_entries\n");
-		return -1;
+	e->device_entries = xmalloc(sizeof(DeviceEntry*) * num_of_devices);
+	if (!e->device_entries) {
+		pr_err("Failed to allocate device_entries\n");
+		return -ENOMEM;
 	}
 
 	for (int i = 0; i < num_of_devices; i++)
 	{
-		DevinfoEntry *entry = xmalloc(sizeof(DevinfoEntry));
+		DeviceEntry *entry = xzalloc(sizeof(*entry));
 		if (!entry) {
 			pr_err("Failed to allocate entry\n");
 			return -ENOMEM;
 		}
 
-		devinfo_entry__init(entry);
+		device_entry__init(entry);
 
-		e->devinfo_entries[i] = entry;
-		e->n_devinfo_entries++;
-
+		e->device_entries[i] = entry;
+		e->n_device_entries++;
 	}
 	return 0;
 }
@@ -308,14 +312,15 @@ static int allocate_ev_entries(CriuKfd *e, int num_events)
 	return 0;
 }
 
-int topology_to_devinfo(struct tp_system *sys, struct kfd_criu_devinfo_bucket *devinfo_buckets,
-			struct device_maps *maps, DevinfoEntry **devinfos)
+int topology_to_devinfo(struct tp_system *sys,
+			struct device_maps *maps,
+			DeviceEntry **deviceEntries)
 {
-	struct tp_node *node;
 	uint32_t devinfo_index = 0;
+	struct tp_node *node;
 
 	list_for_each_entry(node, &sys->nodes, listm_system) {
-		DevinfoEntry *devinfo = devinfos[devinfo_index++];
+		DeviceEntry *devinfo = deviceEntries[devinfo_index++];
 
 		devinfo->node_id = node->id;
 
@@ -382,11 +387,11 @@ int topology_to_devinfo(struct tp_system *sys, struct kfd_criu_devinfo_bucket *d
 	return 0;
 }
 
-int devinfo_to_topology(DevinfoEntry *devinfos[], uint32_t num_devices, struct tp_system *sys)
+int devinfo_to_topology(DeviceEntry *devinfos[], uint32_t num_devices, struct tp_system *sys)
 {
 	for (int i = 0; i < num_devices; i++) {
 		struct tp_node *node;
-		DevinfoEntry *devinfo = devinfos[i];
+		DeviceEntry *devinfo = devinfos[i];
 
 		node = sys_add_node(sys, devinfo->node_id, devinfo->gpu_id);
 		if (!node)
@@ -844,10 +849,98 @@ exit:
 	return ret;
 }
 
+static int dump_devices(int fd,
+			struct kfd_ioctl_criu_process_info_args *info_args,
+			CriuKfd *e)
+{
+	struct kfd_criu_device_bucket *device_buckets;
+	struct kfd_ioctl_criu_dumper_args args;
+	uint8_t *priv_data;
+	int ret = 0, i;
+
+	pr_debug("Dumping %d devices\n", info_args->total_devices);
+
+	ret = init_dumper_args(&args, KFD_CRIU_OBJECT_TYPE_DEVICE, 0, info_args->total_devices,
+			       (info_args->total_devices * sizeof(*device_buckets)) +
+				info_args->devices_priv_data_size);
+	if (ret)
+		goto exit;
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_DUMPER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call dumper (devices) ioctl");
+		goto exit;
+	}
+
+	device_buckets = (struct kfd_criu_device_bucket*)args.objects;
+	/* First private data starts after all buckets */
+	priv_data = (uint8_t *)args.objects + (args.num_objects * sizeof(*device_buckets));
+
+	/* When checkpointing on a node where there was already a checkpoint-restore before, the
+	 * user_gpu_id and actual_gpu_id will be different.
+	 *
+	 * We store the user_gpu_id in the stored image files so that the stored images always have
+	 * the gpu_id's of the node where the application was first launched.
+	 */
+	for (int i = 0; i < args.num_objects; i++)
+		maps_add_gpu_entry(&checkpoint_maps,
+				   device_buckets[i].actual_gpu_id,
+				   device_buckets[i].user_gpu_id);
+
+	e->num_of_gpus = info_args->total_devices;
+	e->num_of_cpus = src_topology.num_nodes - info_args->total_devices;
+
+	/* The ioctl will only return entries for GPUs, but we also store entries for CPUs and the
+	 * information for CPUs is obtained from parsing system topology
+	 */
+	ret = allocate_device_entries(e, src_topology.num_nodes);
+	if (ret) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	pr_debug("Number of CPUs:%d GPUs:%d\n", e->num_of_cpus, e->num_of_gpus);
+
+	/* Store topology information that was obtained from parsing /sys/class/kfd/kfd/topology/ */
+	ret = topology_to_devinfo(&src_topology, &checkpoint_maps, e->device_entries);
+	if (ret)
+		goto exit;
+
+	/* Add private data obtained from IOCTL for each GPU */
+	for (i = 0; i < args.num_objects; i++) {
+		int j;
+		struct kfd_criu_device_bucket *device_bucket = &device_buckets[i];
+		pr_debug("Device[%d] user_gpu_id:%x actual_gpu_id:%x\n",
+					i,
+					device_bucket->user_gpu_id,
+					device_bucket->actual_gpu_id);
+
+		for (j = 0; j < src_topology.num_nodes; j++) {
+			DeviceEntry *devinfo = e->device_entries[j];
+			if (device_bucket->user_gpu_id != devinfo->gpu_id)
+				continue;
+
+			devinfo->private_data.len = device_bucket->priv_data_size;
+			devinfo->private_data.data = xmalloc(devinfo->private_data.len);
+
+			if (!devinfo->private_data.data) {
+				ret = -ENOMEM;
+				goto exit;
+			}
+			memcpy(devinfo->private_data.data,
+				priv_data + device_bucket->priv_data_offset,
+				devinfo->private_data.len);
+		}
+	}
+exit:
+	xfree((void*)args.objects);
+	pr_info("Dumped devices %s (ret:%d)\n", ret ? "Failed" : "Ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_dump_file(int fd, int id)
 {
 	struct kfd_ioctl_criu_process_info_args info_args = {0};
-	struct kfd_criu_devinfo_bucket *devinfo_bucket_ptr;
 	struct kfd_ioctl_criu_dumper_args args = {0};
 	struct kfd_criu_bo_buckets *bo_bucket_ptr;
 	struct kfd_criu_q_bucket *q_bucket_ptr;
@@ -942,15 +1035,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 			info_args.total_devices, info_args.total_bos, info_args.total_queues,
 			info_args.total_events, info_args.total_svm_ranges);
 
-	args.num_of_devices = helper_args.num_of_devices;
-	devinfo_bucket_ptr = xmalloc(helper_args.num_of_devices * sizeof(*devinfo_bucket_ptr));
-
-	if (!devinfo_bucket_ptr) {
-		pr_perror("amdgpu_plugin: failed to allocate devinfo for dumper ioctl\n");
-		return -ENOMEM;
-	}
-	args.kfd_criu_devinfo_buckets_ptr = (uintptr_t)devinfo_bucket_ptr;
-
 	pr_info("amdgpu_plugin: num of bos = %llu\n", helper_args.num_of_bos);
 
 	bo_bucket_ptr = xmalloc(helper_args.num_of_bos * sizeof(*bo_bucket_ptr));
@@ -1014,29 +1098,9 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	if (ret)
 		goto exit;
 
-	/* When checkpointing on a node where there was already a checkpoint-restore before, the
-	 * user_gpu_id and actual_gpu_id will be different.
-	 *
-	 * We store the user_gpu_id in the stored image files so that the stored images always have
-	 * the gpu_id's of the node where the application was first launched. */
-	for (int i = 0; i < args.num_of_devices; i++)
-		maps_add_gpu_entry(&checkpoint_maps, devinfo_bucket_ptr[i].actual_gpu_id,
-				   devinfo_bucket_ptr[i].user_gpu_id);
-
-	ret = allocate_devinfo_entries(e, src_topology.num_nodes);
-	if (ret) {
-		ret = -ENOMEM;
-		goto failed;
-	}
-
-	/* Store local topology information */
-	ret = topology_to_devinfo(&src_topology, devinfo_bucket_ptr,
-					&checkpoint_maps, e->devinfo_entries);
+	ret = dump_devices(fd, &info_args, e);
 	if (ret)
-		goto failed;
-
-	e->num_of_gpus = args.num_of_devices;
-	e->num_of_cpus = src_topology.num_nodes - args.num_of_devices;
+		goto exit;
 
 	ret = allocate_bo_info_test(e, helper_args.num_of_bos, bo_bucket_ptr);
 	if (ret)
@@ -1258,7 +1322,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 exit:
 failed:
 	sys_close_drm_render_devices(&src_topology);
-	xfree(devinfo_bucket_ptr);
 	xfree(bo_bucket_ptr);
 	xfree(q_bucket_ptr);
 	if (ev_buckets_ptr)
@@ -1305,9 +1368,87 @@ exit:
 	return ret;
 }
 
+/* Restore per-device information */
+static int restore_devices(int fd, CriuKfd *e)
+{
+	struct kfd_ioctl_criu_restorer_args args = {0};
+	struct kfd_criu_device_bucket *device_buckets;
+	int ret = 0, bucket_index = 0;
+	uint64_t priv_data_offset = 0;
+	uint64_t objects_size = 0;
+	uint8_t *priv_data;
+
+	pr_debug("Restoring %d devices\n", e->num_of_gpus);
+
+	for (int i = 0; i < e->num_of_cpus + e->num_of_gpus; i++) {
+		/* Skip CPUs */
+		if (!e->device_entries[i]->gpu_id)
+			continue;
+
+		objects_size += sizeof(*device_buckets) +
+				     e->device_entries[i]->private_data.len;
+	}
+
+	ret = init_restorer_args(&args, KFD_CRIU_OBJECT_TYPE_DEVICE, 0, e->num_of_gpus, objects_size);
+	if (ret)
+		goto exit;
+
+	device_buckets = (struct kfd_criu_device_bucket*) args.objects;
+	priv_data = (uint8_t *)args.objects + (args.num_objects * sizeof(*device_buckets));
+
+	for (int entries_i = 0; entries_i < e->num_of_cpus + e->num_of_gpus; entries_i++) {
+		struct kfd_criu_device_bucket *device_bucket;
+		DeviceEntry *devinfo = e->device_entries[entries_i];
+		struct tp_node *tp_node;
+
+		if (!devinfo->gpu_id)
+			continue;
+
+		device_bucket = &device_buckets[bucket_index++];
+
+		device_bucket->priv_data_size = devinfo->private_data.len;
+		device_bucket->priv_data_offset = priv_data_offset;
+
+		priv_data_offset += device_bucket->priv_data_size;
+
+		memcpy(priv_data + device_bucket->priv_data_offset,
+		       devinfo->private_data.data,
+		       device_bucket->priv_data_size);
+
+		device_bucket->user_gpu_id = devinfo->gpu_id;
+		device_bucket->actual_gpu_id = maps_get_dest_gpu(&restore_maps, devinfo->gpu_id);
+		if (!device_bucket->actual_gpu_id) {
+			ret = -ENODEV;
+			goto exit;
+		}
+
+		tp_node = sys_get_node_by_gpu_id(&dest_topology, device_bucket->actual_gpu_id);
+		if (!tp_node) {
+			ret = -ENODEV;
+			goto exit;
+		}
+
+		device_bucket->drm_fd = node_get_drm_render_device(tp_node);
+		if (device_bucket->drm_fd < 0) {
+			ret = device_bucket->drm_fd;
+			goto exit;
+		}
+	}
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_RESTORER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call restorer (devices) ioctl");
+		goto exit;
+	}
+
+exit:
+	xfree((void*)args.objects);
+	pr_info("Restore devices %s (ret:%d)\n", ret ? "Failed" : "Ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_restore_file(int id)
 {
-	struct kfd_criu_devinfo_bucket *devinfo_bucket_ptr = NULL;
 	int ret = 0, fd;
 	struct kfd_ioctl_criu_restorer_args args = {0};
 	struct kfd_criu_bo_buckets *bo_bucket_ptr;
@@ -1431,15 +1572,6 @@ fail:
 		return -1;
 	}
 
-	args.num_of_devices = e->num_of_gpus;
-
-	devinfo_bucket_ptr = xmalloc(args.num_of_devices * sizeof(*devinfo_bucket_ptr));
-	if (!devinfo_bucket_ptr) {
-		fd = -ENOMEM;
-		goto clean;
-	}
-	args.kfd_criu_devinfo_buckets_ptr = (uintptr_t)devinfo_bucket_ptr;
-
 	if (set_restore_gpu_maps(&src_topology, &dest_topology, &restore_maps)) {
 		fd = -EBADFD;
 		goto clean;
@@ -1449,39 +1581,9 @@ fail:
 	if (ret)
 		goto exit;
 
-	int bucket_index = 0;
-	for (int entries_index = 0; entries_index < e->num_of_gpus + e->num_of_cpus; entries_index++) {
-		struct tp_node *tp_node;
-		int drm_fd;
-
-		if (!e->devinfo_entries[entries_index]->gpu_id)
-			continue;
-
-		devinfo_bucket_ptr[bucket_index].user_gpu_id = e->devinfo_entries[entries_index]->gpu_id;
-
-		devinfo_bucket_ptr[bucket_index].actual_gpu_id =
-				maps_get_dest_gpu(&restore_maps, e->devinfo_entries[entries_index]->gpu_id);
-
-		if (!devinfo_bucket_ptr[bucket_index].actual_gpu_id) {
-			fd = -ENODEV;
-			goto clean;
-		}
-
-		tp_node = sys_get_node_by_gpu_id(&dest_topology,
-							devinfo_bucket_ptr[bucket_index].actual_gpu_id);
-		if (!tp_node) {
-			fd = -ENODEV;
-			goto clean;
-		}
-
-		drm_fd = node_get_drm_render_device(tp_node);
-		if (drm_fd < 0) {
-			fd = -drm_fd;
-			goto clean;
-		}
-		devinfo_bucket_ptr[bucket_index].drm_fd = drm_fd;
-		bucket_index++;
-	}
+	ret = restore_devices(fd, e);
+	if (ret)
+		goto exit;
 
 	for (int i = 0; i < e->num_of_bos; i++ )
 	{
@@ -1763,7 +1865,6 @@ fail:
 clean:
 exit:
 	sys_close_drm_render_devices(&dest_topology);
-	xfree(devinfo_bucket_ptr);
 	if (ev_bucket_ptr)
 		xfree(ev_bucket_ptr);
 	if (q_bucket_ptr)
