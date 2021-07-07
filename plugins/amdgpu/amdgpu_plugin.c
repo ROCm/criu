@@ -809,6 +809,24 @@ static int init_restorer_args(struct kfd_ioctl_criu_restorer_args *args, __u32 t
 	return 0;
 }
 
+static int pause_process(int fd, const bool enable)
+{
+	int ret = 0;
+	struct kfd_ioctl_criu_pause_args args = {0};
+
+	args.pause = enable ? 1 : 0;
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_PAUSE, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call pause ioctl");
+		goto exit;
+	}
+
+exit:
+	pr_info("Process %s %s (ret:%d)\n", enable ? "pause" : "unpause", ret ? "Failed" : "Ok", ret);
+
+	return ret;
+}
 
 static int dump_process(int fd, struct kfd_ioctl_criu_process_info_args *info_args, CriuKfd *e)
 {
@@ -1204,7 +1222,6 @@ exit:
 int amdgpu_plugin_dump_file(int fd, int id)
 {
 	struct kfd_ioctl_criu_process_info_args info_args = {0};
-	struct kfd_ioctl_criu_dumper_args args = {0};
 	int ret;
 	char img_path[PATH_MAX];
 	struct stat st, st_kfd;
@@ -1255,10 +1272,8 @@ int amdgpu_plugin_dump_file(int fd, int id)
 		}
 
 		rd.gpu_id = maps_get_dest_gpu(&checkpoint_maps, tp_node->gpu_id);
-		if (!rd.gpu_id) {
+		if (!rd.gpu_id)
 			return -ENODEV;
-			goto failed;
-		}
 
 		len = criu_render_node__get_packed_size(&rd);
 		buf = xmalloc(len);
@@ -1283,6 +1298,11 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	pr_info("amdgpu_plugin: %s : %s() called for fd = %d\n", CR_PLUGIN_DESC.name,
 		  __func__, major(st.st_rdev));
 
+	/* Evict all queues */
+	ret = pause_process(fd, true);
+	if (ret)
+		goto exit;
+
 	if (kmtIoctl(fd, AMDKFD_IOC_CRIU_PROCESS_INFO, &info_args) == -1) {
 		pr_perror("amdgpu_plugin: Failed to call process info ioctl");
 		return -1;
@@ -1291,14 +1311,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	pr_info("amdgpu_plugin: devices:%d bos:%lld queues:%d events:%d svm-range:%lld\n",
 			info_args.total_devices, info_args.total_bos, info_args.total_queues,
 			info_args.total_events, info_args.total_svm_ranges);
-
-	/* call dumper ioctl, pass num of BOs to dump */
-        if (kmtIoctl(fd, AMDKFD_IOC_CRIU_DUMPER, &args) == -1) {
-		pr_perror("amdgpu_plugin: failed to call kfd ioctl from plugin dumper for fd = %d\n", major(st.st_rdev));
-		return -1;
-	}
-
-	pr_info("amdgpu_plugin: success in calling dumper ioctl\n");
 
 	e = xmalloc(sizeof(*e));
 	if (!e) {
@@ -1331,7 +1343,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 
 	ret = check_hsakmt_shared_mem(&e->shared_mem_size, &e->shared_mem_magic);
 	if (ret)
-		goto failed;
+		goto exit;
 
 	snprintf(img_path, sizeof(img_path), "kfd.%d.img", id);
 	pr_info("amdgpu_plugin: img_path = %s", img_path);
@@ -1344,23 +1356,26 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	if (!buf) {
 		pr_perror("failed to allocate memory\n");
 		ret = -ENOMEM;
-		goto failed;
+		goto exit;
 	}
 
 	criu_kfd__pack(e, buf);
 
 	ret = write_file(img_path,  buf, len);
-	if (ret)
-		ret = -1;
 
 	xfree(buf);
 exit:
-failed:
+	/* Restore all queues */
+	pause_process(fd, false);
+
 	sys_close_drm_render_devices(&src_topology);
 	free_e(e);
-	pr_info("amdgpu_plugin: Exiting from dumper for fd = %d\n", major(st.st_rdev));
-        return ret;
 
+	if (ret)
+		pr_err("amdgpu_plugin: Failed to dump (ret:%d)\n", ret);
+	else
+		pr_info("amdgpu_plugin: Dump successful\n");
+	return ret;
 }
 CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__DUMP_EXT_FILE, amdgpu_plugin_dump_file)
 
@@ -1749,12 +1764,11 @@ exit:
 int amdgpu_plugin_restore_file(int id)
 {
 	int ret = 0, fd;
-	struct kfd_ioctl_criu_restorer_args args = {0};
 	char img_path[PATH_MAX];
 	struct stat filestat;
 	unsigned char *buf;
 	CriuRenderNode *rd;
-	CriuKfd *e;
+	CriuKfd *e = NULL;
 
 	pr_info("amdgpu_plugin: Initialized kfd plugin restorer with ID = %d\n", id);
 
@@ -1839,35 +1853,40 @@ fail:
 		return -ENOMEM;
 	}
 
-	if (read_file(img_path, buf, filestat.st_size)) {
+	ret = read_file(img_path, buf, filestat.st_size);
+	if (ret) {
 		xfree(buf);
-		return -1;
+		goto exit;
 	}
 
 	e = criu_kfd__unpack(NULL, filestat.st_size, buf);
 	if (e == NULL) {
 		pr_err("Unable to parse the KFD message %#x\n", id);
 		xfree(buf);
-		return -1;
+		ret = -EINVAL;
+		goto exit;
 	}
+	xfree(buf);
 
 	plugin_log_msg("amdgpu_plugin: read image file data\n");
 
-	if (devinfo_to_topology(e->devinfo_entries, e->num_of_gpus + e->num_of_cpus, &src_topology)) {
+	ret = devinfo_to_topology(e->device_entries, e->num_of_gpus + e->num_of_cpus, &src_topology);
+	if (ret) {
 		pr_err("Failed to convert stored device information to topology\n");
-		xfree(buf);
-		return -1;
+		ret = -EINVAL;
+		goto exit;
 	}
 
-	if (topology_parse(&dest_topology, "Local")) {
+	ret = topology_parse(&dest_topology, "Local");
+	if (ret) {
 		pr_err("Failed to parse local system topology\n");
-		xfree(buf);
-		return -1;
+		goto exit;
 	}
 
-	if (set_restore_gpu_maps(&src_topology, &dest_topology, &restore_maps)) {
-		fd = -EBADFD;
-		goto clean;
+	ret = set_restore_gpu_maps(&src_topology, &dest_topology, &restore_maps);
+	if (ret) {
+		pr_err("Failed to map GPUs\n");
+		goto exit;
 	}
 
 	ret = restore_process(fd, e);
@@ -1890,24 +1909,21 @@ fail:
 	if (ret)
 		goto exit;
 
-	if (kmtIoctl(fd, AMDKFD_IOC_CRIU_RESTORER, &args) == -1) {
-		pr_perror("amdgpu_plugin: failed to call kfd ioctl from plugin restorer for id = %d\n", id);
-		fd = -EBADFD;
-		goto clean;
-	}
+	ret = restore_hsakmt_shared_mem(e->shared_mem_size, e->shared_mem_magic);
 
-	if (restore_hsakmt_shared_mem(e->shared_mem_size, e->shared_mem_magic)) {
-		fd = -EBADFD;
-		goto clean;
-	}
-
-clean:
 exit:
 	sys_close_drm_render_devices(&dest_topology);
-	xfree(buf);
 
-	criu_kfd__free_unpacked(e, NULL);
-	pr_info("amdgpu_plugin: returning kfd fd from plugin, fd = %d\n", fd);
+	if (e)
+		criu_kfd__free_unpacked(e, NULL);
+
+	if (ret) {
+		pr_err("amdgpu_plugin: Failed to restore (ret:%d)\n", ret);
+		fd = ret;
+	} else {
+		pr_info("amdgpu_plugin: Restore successful (fd:%d)\n", fd);
+	}
+
 	return fd;
 }
 CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__RESTORE_EXT_FILE, amdgpu_plugin_restore_file)
