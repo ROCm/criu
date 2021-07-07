@@ -742,7 +742,7 @@ int restore_hsakmt_shared_mem(const uint64_t shared_mem_size, const uint32_t sha
 
 int amdgpu_plugin_dump_file(int fd, int id)
 {
-	struct kfd_ioctl_criu_helper_args helper_args = {0};
+	struct kfd_ioctl_criu_process_info_args info_args = {0};
 	struct kfd_criu_devinfo_bucket *devinfo_bucket_ptr;
 	struct kfd_ioctl_criu_dumper_args args = {0};
 	struct kfd_criu_bo_buckets *bo_bucket_ptr;
@@ -829,10 +829,14 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	pr_info("amdgpu_plugin: %s : %s() called for fd = %d\n", CR_PLUGIN_DESC.name,
 		  __func__, major(st.st_rdev));
 
-	if (kmtIoctl(fd, AMDKFD_IOC_CRIU_HELPER, &helper_args) == -1) {
-		pr_perror("amdgpu_plugin: failed to call helper ioctl\n");
+	if (kmtIoctl(fd, AMDKFD_IOC_CRIU_PROCESS_INFO, &info_args) == -1) {
+		pr_perror("amdgpu_plugin: Failed to call process info ioctl");
 		return -1;
 	}
+
+	pr_info("amdgpu_plugin: devices:%d bos:%lld queues:%d events:%d svm-range:%lld\n",
+			info_args.total_devices, info_args.total_bos, info_args.total_queues,
+			info_args.total_events, info_args.total_svm_ranges);
 
 	args.num_of_devices = helper_args.num_of_devices;
 	devinfo_bucket_ptr = xmalloc(helper_args.num_of_devices * sizeof(*devinfo_bucket_ptr));
@@ -900,7 +904,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	}
 
 	criu_kfd__init(e);
-	e->pid = helper_args.task_pid;
+	e->pid = info_args.task_pid;
 
 	/* When checkpointing on a node where there was already a checkpoint-restore before, the
 	 * user_gpu_id and actual_gpu_id will be different.
