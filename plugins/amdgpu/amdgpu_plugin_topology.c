@@ -58,6 +58,34 @@ bool kfd_vram_size_check;
 /* Preserve NUMA regions */
 bool kfd_numa_check;
 
+#define DRM_FIRST_RENDER_NODE 128
+#define DRM_LAST_RENDER_NODE 255
+
+static int open_drm_render_device(int minor)
+{
+	char path[128];
+	int fd;
+
+	if (minor < DRM_FIRST_RENDER_NODE || minor > DRM_LAST_RENDER_NODE) {
+		pr_perror("DRM render minor %d out of range [%d, %d]", minor,
+			  DRM_FIRST_RENDER_NODE, DRM_LAST_RENDER_NODE);
+		return -EINVAL;
+	}
+
+	snprintf(path, sizeof(path), "/dev/dri/renderD%d", minor);
+	fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		if (errno != ENOENT && errno != EPERM) {
+			pr_err("Failed to open %s: %s\n", path, strerror(errno));
+			if (errno == EACCES)
+				pr_err("Check user is in \"video\" group\n");
+		}
+		return -EBADFD;
+	}
+
+	return fd;
+}
+
 static const char *link_type(uint32_t type){
 	switch(type) {
 		case TOPO_IOLINK_TYPE_PCIE:
@@ -78,6 +106,26 @@ static struct tp_node *p2pgroup_get_node_by_gpu_id(const struct tp_p2pgroup *gro
 			return node;
 	}
 	return NULL;
+}
+
+int node_get_drm_render_device(struct tp_node *node)
+{
+	if (node->drm_fd < 0)
+		node->drm_fd = open_drm_render_device(node->drm_render_minor);
+
+	return node->drm_fd;
+}
+
+void sys_close_drm_render_devices(struct tp_system *sys)
+{
+	struct tp_node *node;
+
+	list_for_each_entry(node, &sys->nodes, listm_system) {
+		if (node->drm_fd >= 0) {
+			close(node->drm_fd);
+			node->drm_fd = -1;
+		}
+	}
 }
 
 static struct tp_iolink *node_get_iolink_to_node_id(const struct tp_node *node, const uint32_t type,
@@ -351,6 +399,7 @@ struct tp_node *sys_add_node(struct tp_system *sys, uint32_t id, uint32_t gpu_id
 
 	node->id = id;
 	node->gpu_id = gpu_id;
+	node->drm_fd = -1;
 	INIT_LIST_HEAD(&node->iolinks);
 	list_add_tail(&node->listm_system, &sys->nodes);
 	sys->num_nodes++;

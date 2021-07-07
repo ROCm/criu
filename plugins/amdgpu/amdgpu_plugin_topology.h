@@ -62,6 +62,8 @@ struct tp_node {
 
 	uint32_t num_valid_iolinks;
 	struct list_head iolinks;
+
+	int drm_fd;
 };
 
 struct tp_p2pgroup {
@@ -111,6 +113,10 @@ struct tp_iolink *node_add_iolink(struct tp_node *node, uint32_t type, uint32_t 
 struct tp_node *sys_get_node_by_gpu_id(const struct tp_system *sys, const uint32_t gpu_id);
 struct tp_node *sys_get_node_by_render_minor(const struct tp_system *sys,
 						const int drm_render_minor);
+
+int node_get_drm_render_device(struct tp_node *node);
+void sys_close_drm_render_devices(struct tp_system *sys);
+
 int set_restore_gpu_maps(struct tp_system *tp_checkpoint,
 			 struct tp_system *tp_local,
 			 struct device_maps *maps);

@@ -26,9 +26,6 @@
 #include "common/list.h"
 #include "amdgpu_plugin_topology.h"
 
-#define DRM_FIRST_RENDER_NODE 128
-#define DRM_LAST_RENDER_NODE 255
-
 #define PROCPIDMEM      "/proc/%d/mem"
 #define HSAKMT_SHM_PATH "/dev/shm/hsakmt_shared_mem"
 #define HSAKMT_SHM      "/hsakmt_shared_mem"
@@ -76,31 +73,6 @@ extern bool kfd_vram_size_check;
 extern bool kfd_numa_check;
 
 /**************************************************************************************************/
-
-int open_drm_render_device(int minor)
-{
-	char path[128];
-	int fd;
-
-	if (minor < DRM_FIRST_RENDER_NODE || minor > DRM_LAST_RENDER_NODE) {
-		pr_perror("DRM render minor %d out of range [%d, %d]\n", minor,
-			  DRM_FIRST_RENDER_NODE, DRM_LAST_RENDER_NODE);
-		return -EINVAL;
-	}
-
-	sprintf(path, "/dev/dri/renderD%d", minor);
-	fd = open(path, O_RDWR | O_CLOEXEC);
-	if (fd < 0) {
-		if (errno != ENOENT && errno != EPERM) {
-			pr_err("Failed to open %s: %s\n", path, strerror(errno));
-			if (errno == EACCES)
-				pr_err("Check user is in \"video\" group\n");
-		}
-		return -EBADFD;
-	}
-
-	return fd;
-}
 
 int write_file(const char *file_path, const void *buf, const size_t buf_len)
 {
@@ -1015,7 +987,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 			goto failed;
 		}
 
-		thread_datas[i].drm_fd = open_drm_render_device(dev->drm_render_minor);
+		thread_datas[i].drm_fd = node_get_drm_render_device(dev);
 		if (thread_datas[i].drm_fd < 0) {
 			ret = thread_datas[i].drm_fd;
 			goto failed;
@@ -1032,9 +1004,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	for (int i = 0; i < helper_args.num_of_devices; i++) {
 		pthread_join(thread_datas[i].thread, NULL);
 		pr_info("Thread[0x%x] finished ret:%d\n", thread_datas[i].gpu_id, thread_datas[i].ret);
-
-		if (thread_datas[i].drm_fd >= 0)
-			close(thread_datas[i].drm_fd);
 
 		if (thread_datas[i].ret) {
 			ret = thread_datas[i].ret;
@@ -1175,6 +1144,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 
 	xfree(buf);
 failed:
+	sys_close_drm_render_devices(&src_topology);
 	xfree(devinfo_bucket_ptr);
 	xfree(bo_bucket_ptr);
 	xfree(q_bucket_ptr);
@@ -1263,7 +1233,7 @@ int amdgpu_plugin_restore_file(int id)
 
 		pr_info("amdgpu_plugin: render node destination gpu_id = 0x%04x\n", tp_node->gpu_id);
 
-		fd = open_drm_render_device(tp_node->drm_render_minor);
+		fd = node_get_drm_render_device(tp_node);
 		if (fd < 0)
 			pr_err("amdgpu_plugin: Failed to open render device (minor:%d)\n",
 									tp_node->drm_render_minor);
@@ -1352,7 +1322,7 @@ fail:
 			goto clean;
 		}
 
-		drm_fd = open_drm_render_device(tp_node->drm_render_minor);
+		drm_fd = node_get_drm_render_device(tp_node);
 		if (drm_fd < 0) {
 			fd = -drm_fd;
 			goto clean;
@@ -1632,9 +1602,6 @@ fail:
 		pthread_join(thread_datas[i].thread, NULL);
 		pr_info("Thread[0x%x] finished ret:%d\n", thread_datas[i].gpu_id, thread_datas[i].ret);
 
-		if (devinfo_bucket_ptr[i].drm_fd >= 0)
-			close(devinfo_bucket_ptr[i].drm_fd);
-
 		if (thread_datas[i].ret) {
 			fd = thread_datas[i].ret;
 			goto clean;
@@ -1642,6 +1609,7 @@ fail:
 	}
 
 clean:
+	sys_close_drm_render_devices(&dest_topology);
 	xfree(devinfo_bucket_ptr);
 	if (ev_bucket_ptr)
 		xfree(ev_bucket_ptr);
