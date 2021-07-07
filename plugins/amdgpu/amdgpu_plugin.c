@@ -156,11 +156,16 @@ int kmtIoctl(int fd, unsigned long request, void *arg)
 
 static void free_e(CriuKfd *e)
 {
-	for (int i = 0; i < e->n_bo_info_test; i++) {
-		if (e->bo_info_test[i]->bo_rawdata.data)
-			xfree(e->bo_info_test[i]->bo_rawdata.data);
-		if (e->bo_info_test[i])
-			xfree(e->bo_info_test[i]);
+	for (int i = 0; i < e->n_bo_entries; i++) {
+		if (e->bo_entries[i]) {
+			if (e->bo_entries[i]->private_data.data)
+				xfree(e->bo_entries[i]->private_data.data);
+
+			if (e->bo_entries[i]->rawdata.data)
+				xfree(e->bo_entries[i]->rawdata.data);
+
+			xfree(e->bo_entries[i]);
+		}
 	}
 
 	for (int i = 0; i < e->n_device_entries; i++) {
@@ -230,39 +235,33 @@ static int allocate_device_entries(CriuKfd *e, int num_of_devices)
 	return 0;
 }
 
-static int allocate_bo_info_test(CriuKfd *e, int num_bos, struct kfd_criu_bo_buckets *bo_bucket_ptr)
+static int allocate_bo_entries(CriuKfd *e, int num_bos, struct kfd_criu_bo_bucket *bo_bucket_ptr)
 {
-	e->bo_info_test = xmalloc(sizeof(BoEntriesTest*) * num_bos);
-	if (!e->bo_info_test) {
+	e->bo_entries = xmalloc(sizeof(BoEntry*) * num_bos);
+	if (!e->bo_entries) {
 		pr_err("Failed to allocate bo_info\n");
 		return -ENOMEM;
 	}
 
-	pr_info("Inside allocate_bo_info_test\n");
-	for (int i = 0; i < num_bos; i++)
-	{
-		BoEntriesTest *botest;
-		botest = xmalloc(sizeof(*botest));
-		if (!botest) {
+	for (int i = 0; i < num_bos; i++) {
+		BoEntry *entry = xzalloc(sizeof(*entry));
+		if (!entry) {
 			pr_err("Failed to allocate botest\n");
 			return -ENOMEM;
 		}
 
-		bo_entries_test__init(botest);
+		bo_entry__init(entry);
 
-		if ((bo_bucket_ptr)[i].bo_alloc_flags &
-		    KFD_IOC_ALLOC_MEM_FLAGS_VRAM ||
-		    (bo_bucket_ptr)[i].bo_alloc_flags &
-		    KFD_IOC_ALLOC_MEM_FLAGS_GTT) {
-			botest->bo_rawdata.data = xmalloc((bo_bucket_ptr)[i].bo_size);
-			botest->bo_rawdata.len = (bo_bucket_ptr)[i].bo_size;
+		if ((bo_bucket_ptr)[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM ||
+		    (bo_bucket_ptr)[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT) {
+			entry->rawdata.data = xmalloc((bo_bucket_ptr)[i].size);
+			entry->rawdata.len = (bo_bucket_ptr)[i].size;
 		}
 
-		e->bo_info_test[i] = botest;
-		e->n_bo_info_test++;
+		e->bo_entries[i] = entry;
+		e->n_bo_entries++;
 
 	}
-
 	return 0;
 }
 
@@ -505,9 +504,8 @@ struct thread_data {
 	uint64_t num_of_bos;
 	uint32_t gpu_id;
 	pid_t pid;
-	struct kfd_criu_bo_buckets *bo_buckets;
-	BoEntriesTest **bo_info_test;
-	__u64 *restored_bo_offsets;
+	struct kfd_criu_bo_bucket *bo_buckets;
+	BoEntry **bo_entries;
 	int drm_fd;
 	int ret;
 };
@@ -517,8 +515,8 @@ void *dump_bo_contents(void *_thread_data)
 	int i, ret = 0;
 	int num_bos = 0;
 	struct thread_data* thread_data = (struct thread_data*) _thread_data;
-	struct kfd_criu_bo_buckets *bo_buckets = thread_data->bo_buckets;
-	BoEntriesTest **bo_info_test = thread_data->bo_info_test;
+	struct kfd_criu_bo_bucket *bo_buckets = thread_data->bo_buckets;
+	BoEntry **bo_info = thread_data->bo_entries;
 	char *fname;
 	int mem_fd = -1;
 
@@ -544,21 +542,21 @@ void *dump_bo_contents(void *_thread_data)
 			continue;
 
 		num_bos++;
-		if (!(bo_buckets[i].bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) &&
-		    !(bo_buckets[i].bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
+		if (!(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) &&
+		    !(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
 			continue;
 
-		if (bo_info_test[i]->bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC) {
+		if (bo_info[i]->alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC) {
 			void *addr;
 
 			plugin_log_msg("amdgpu_plugin: large bar read possible\n");
 
 			addr = mmap(NULL,
-					bo_buckets[i].bo_size,
+					bo_buckets[i].size,
 					PROT_READ,
 					MAP_SHARED,
 					thread_data->drm_fd,
-					bo_buckets[i].bo_offset);
+					bo_buckets[i].offset);
 			if (addr == MAP_FAILED) {
 				pr_perror("amdgpu_plugin: mmap failed\n");
 				ret = -errno;
@@ -566,19 +564,19 @@ void *dump_bo_contents(void *_thread_data)
 			}
 
 			/* direct memcpy is possible on large bars */
-			memcpy(bo_info_test[i]->bo_rawdata.data, addr, bo_buckets[i].bo_size);
-			munmap(addr, bo_buckets[i].bo_size);
+			memcpy(bo_info[i]->rawdata.data, addr, bo_buckets[i].size);
+			munmap(addr, bo_buckets[i].size);
 		} else {
-			plugin_log_msg("Now try reading BO contents with /proc/pid/mem");
-			if (lseek (mem_fd, (off_t) bo_buckets[i].bo_addr, SEEK_SET) == -1) {
-				pr_perror("Can't lseek for bo_offset for pid = %d\n", thread_data->pid);
+			plugin_log_msg("Now try reading BO contents with /proc/pid/mem\n");
+			if (lseek (mem_fd, (off_t) bo_buckets[i].addr, SEEK_SET) == -1) {
+				pr_perror("Can't lseek for BO offset for pid = %d", thread_data->pid);
 				ret = -errno;
 				goto exit;
 			}
 			plugin_log_msg("Try to read file now\n");
 
-			if (read(mem_fd, bo_info_test[i]->bo_rawdata.data,
-				bo_info_test[i]->bo_size) != bo_info_test[i]->bo_size) {
+			if (read(mem_fd, bo_info[i]->rawdata.data,
+				bo_info[i]->size) != bo_info[i]->size) {
 				pr_perror("Can't read buffer\n");
 				ret = -errno;
 				goto exit;
@@ -601,9 +599,8 @@ void *restore_bo_contents(void *_thread_data)
 	int i, ret = 0;
 	int num_bos = 0;
 	struct thread_data* thread_data = (struct thread_data*) _thread_data;
-	struct kfd_criu_bo_buckets *bo_buckets = thread_data->bo_buckets;
-	BoEntriesTest **bo_info_test = thread_data->bo_info_test;
-	__u64 *restored_bo_offsets_array = thread_data->restored_bo_offsets;
+	struct kfd_criu_bo_bucket *bo_buckets = thread_data->bo_buckets;
+	BoEntry **bo_info = thread_data->bo_entries;
 	char *fname;
 	int mem_fd = -1;
 
@@ -632,20 +629,20 @@ void *restore_bo_contents(void *_thread_data)
 
 		num_bos++;
 
-		if (!(bo_buckets[i].bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) &&
-			!(bo_buckets[i].bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
+		if (!(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) &&
+			!(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
 			continue;
 
-		if (bo_info_test[i]->bo_alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC) {
+		if (bo_info[i]->alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC) {
 
 			plugin_log_msg("amdgpu_plugin: large bar write possible\n");
 
 			addr = mmap(NULL,
-					bo_buckets[i].bo_size,
+					bo_buckets[i].size,
 					PROT_WRITE,
 					MAP_SHARED,
 					thread_data->drm_fd,
-					restored_bo_offsets_array[i]);
+					bo_buckets[i].restored_offset);
 			if (addr == MAP_FAILED) {
 				pr_perror("amdgpu_plugin: mmap failed\n");
 				ret = -errno;
@@ -653,19 +650,19 @@ void *restore_bo_contents(void *_thread_data)
 			}
 
 			/* direct memcpy is possible on large bars */
-			memcpy(addr, (void *)bo_info_test[i]->bo_rawdata.data, bo_info_test[i]->bo_size);
-			munmap(addr, bo_info_test[i]->bo_size);
+			memcpy(addr, (void *)bo_info[i]->rawdata.data, bo_info[i]->size);
+			munmap(addr, bo_info[i]->size);
 		} else {
 			/* Use indirect host data path via /proc/pid/mem on small pci bar GPUs or
 			 * for Buffer Objects that don't have HostAccess permissions.
 			 */
 			plugin_log_msg("amdgpu_plugin: using PROCPIDMEM to restore BO contents\n");
 			addr = mmap(NULL,
-				    bo_info_test[i]->bo_size,
+				    bo_info[i]->size,
 				    PROT_NONE,
 				    MAP_SHARED,
 				    thread_data->drm_fd,
-				    restored_bo_offsets_array[i]);
+				    bo_buckets[i].restored_offset);
 
 			if (addr == MAP_FAILED) {
 				pr_perror("amdgpu_plugin: mmap failed\n");
@@ -674,19 +671,19 @@ void *restore_bo_contents(void *_thread_data)
 			}
 
 			if (lseek (mem_fd, (off_t) addr, SEEK_SET) == -1) {
-				pr_perror("Can't lseek for bo_offset for pid = %d\n", thread_data->pid);
+				pr_perror("Can't lseek for BO offset for pid = %d", thread_data->pid);
 				ret = -errno;
 				goto exit;
 			}
 
 			plugin_log_msg("Attempt writting now\n");
-			if (write(mem_fd, bo_info_test[i]->bo_rawdata.data, bo_info_test[i]->bo_size) !=
-			    bo_info_test[i]->bo_size) {
+			if (write(mem_fd, bo_info[i]->rawdata.data, bo_info[i]->size) !=
+			    bo_info[i]->size) {
 				pr_perror("Can't write buffer\n");
 				ret = -errno;
 				goto exit;
 			}
-			munmap(addr, bo_info_test[i]->bo_size);
+			munmap(addr, bo_info[i]->size);
 		}
 	}
 
@@ -938,11 +935,132 @@ exit:
 	return ret;
 }
 
+static int dump_bos(int fd, struct kfd_ioctl_criu_process_info_args *info_args, CriuKfd *e)
+{
+	struct kfd_ioctl_criu_dumper_args args = {0};
+	struct kfd_criu_bo_bucket *bo_buckets;
+	struct thread_data *thread_datas;
+	uint8_t *priv_data;
+	int ret = 0, i;
+
+	pr_debug("Dumping %lld BOs\n", info_args->total_bos);
+
+	thread_datas = xzalloc(sizeof(*thread_datas) * e->num_of_gpus);
+	if (!thread_datas) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	ret = init_dumper_args(&args, KFD_CRIU_OBJECT_TYPE_BO, 0, info_args->total_bos,
+			       (info_args->total_bos * sizeof(*bo_buckets)) +
+			        info_args->bos_priv_data_size);
+
+	if (ret)
+		goto exit;
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_DUMPER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call dumper (bos) ioctl");
+		goto exit;
+	}
+
+	bo_buckets = (struct kfd_criu_bo_bucket*)args.objects;
+	/* First private data starts after all buckets */
+	priv_data = (uint8_t *)args.objects + (args.num_objects * sizeof(*bo_buckets));
+
+	e->num_of_bos = info_args->total_bos;
+	ret = allocate_bo_entries(e, e->num_of_bos, bo_buckets);
+	if (ret) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	for (i = 0; i < args.num_objects; i++) {
+		struct kfd_criu_bo_bucket *bo_bucket = &bo_buckets[i];
+		BoEntry *boinfo = e->bo_entries[i];
+
+		boinfo->private_data.len = bo_bucket->priv_data_size;
+		boinfo->private_data.data = xmalloc(boinfo->private_data.len);
+
+		if (!boinfo->private_data.data) {
+			ret = -ENOMEM;
+			goto exit;
+		}
+		memcpy(boinfo->private_data.data,
+			priv_data + bo_bucket->priv_data_offset,
+			boinfo->private_data.len);
+
+		plugin_log_msg("BO [%d] gpu_id:%x addr:%llx size:%llx offset:%llx dmabuf_handle:%d\n",
+					i,
+					bo_bucket->gpu_id,
+					bo_bucket->addr,
+					bo_bucket->size,
+					bo_bucket->offset,
+					bo_bucket->dmabuf_handle);
+
+		boinfo->gpu_id = maps_get_dest_gpu(&checkpoint_maps, bo_bucket->gpu_id);
+		if (!boinfo->gpu_id) {
+			ret = -ENODEV;
+			goto exit;
+		}
+		boinfo->addr = bo_bucket->addr;
+		boinfo->size = bo_bucket->size;
+		boinfo->offset = bo_bucket->offset;
+		boinfo->alloc_flags = bo_bucket->alloc_flags;
+	}
+
+	for (int i = 0; i < e->num_of_gpus; i++) {
+		struct tp_node *dev;
+		int ret_thread = 0;
+
+		dev = sys_get_node_by_index(&src_topology, i);
+		if (!dev) {
+			ret = -ENODEV;
+			goto exit;
+		}
+
+		thread_datas[i].gpu_id = dev->gpu_id;
+		thread_datas[i].bo_buckets = bo_buckets;
+		thread_datas[i].bo_entries = e->bo_entries;
+		thread_datas[i].pid = e->pid;
+		thread_datas[i].num_of_bos = info_args->total_bos;
+		thread_datas[i].drm_fd = node_get_drm_render_device(dev);
+		if (thread_datas[i].drm_fd < 0) {
+			ret = thread_datas[i].drm_fd;
+			goto exit;
+		}
+
+		ret_thread = pthread_create(&thread_datas[i].thread, NULL, dump_bo_contents, (void*) &thread_datas[i]);
+		if (ret_thread) {
+			pr_err("Failed to create thread[%i]\n", i);
+			ret = -ret_thread;
+			goto exit;
+		}
+	}
+
+	for (int i = 0; i <  e->num_of_gpus; i++) {
+		pthread_join(thread_datas[i].thread, NULL);
+		pr_info("Thread[0x%x] finished ret:%d\n", thread_datas[i].gpu_id, thread_datas[i].ret);
+
+		if (thread_datas[i].drm_fd >= 0)
+			close(thread_datas[i].drm_fd);
+
+		if (thread_datas[i].ret) {
+			ret = thread_datas[i].ret;
+			goto exit;
+		}
+	}
+exit:
+	xfree((void*)args.objects);
+	xfree(thread_datas);
+	pr_info("Dumped bos %s (ret:%d)\n", ret ? "failed" : "ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_dump_file(int fd, int id)
 {
 	struct kfd_ioctl_criu_process_info_args info_args = {0};
 	struct kfd_ioctl_criu_dumper_args args = {0};
-	struct kfd_criu_bo_buckets *bo_bucket_ptr;
 	struct kfd_criu_q_bucket *q_bucket_ptr;
 	struct kfd_criu_ev_bucket *ev_buckets_ptr = NULL;
 	int ret;
@@ -950,9 +1068,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	struct stat st, st_kfd;
 	unsigned char *buf;
 	size_t len;
-
-	struct thread_data thread_datas[NUM_OF_SUPPORTED_GPUS];
-	memset(thread_datas, 0, sizeof(thread_datas));
 
 	pr_debug("amdgpu_plugin: Enter cr_plugin_dump_file()- ID = 0x%x\n", id);
 	ret = 0;
@@ -1035,18 +1150,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 			info_args.total_devices, info_args.total_bos, info_args.total_queues,
 			info_args.total_events, info_args.total_svm_ranges);
 
-	pr_info("amdgpu_plugin: num of bos = %llu\n", helper_args.num_of_bos);
-
-	bo_bucket_ptr = xmalloc(helper_args.num_of_bos * sizeof(*bo_bucket_ptr));
-
-	if (!bo_bucket_ptr) {
-		pr_perror("amdgpu_plugin: failed to allocate args for dumper ioctl\n");
-		return -ENOMEM;
-	}
-
-	args.num_of_bos = helper_args.num_of_bos;
-	args.kfd_criu_bo_buckets_ptr = (uintptr_t)bo_bucket_ptr;
-
 	pr_info("amdgpu_plugin: num of queues = %u\n", helper_args.num_of_queues);
 
 	q_bucket_ptr = xmalloc(helper_args.num_of_queues * sizeof(*q_bucket_ptr));
@@ -1078,7 +1181,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	/* call dumper ioctl, pass num of BOs to dump */
         if (kmtIoctl(fd, AMDKFD_IOC_CRIU_DUMPER, &args) == -1) {
 		pr_perror("amdgpu_plugin: failed to call kfd ioctl from plugin dumper for fd = %d\n", major(st.st_rdev));
-		xfree(bo_bucket_ptr);
 		return -1;
 	}
 
@@ -1087,7 +1189,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	e = xmalloc(sizeof(*e));
 	if (!e) {
 		pr_err("Failed to allocate proto structure\n");
-		xfree(bo_bucket_ptr);
 		return -ENOMEM;
 	}
 
@@ -1102,90 +1203,9 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	if (ret)
 		goto exit;
 
-	ret = allocate_bo_info_test(e, helper_args.num_of_bos, bo_bucket_ptr);
+	ret = dump_bos(fd, &info_args, e);
 	if (ret)
-		return -1;
-
-	for (int i = 0; i < helper_args.num_of_bos; i++)
-	{
-		(e->bo_info_test[i])->bo_addr = (bo_bucket_ptr)[i].bo_addr;
-		(e->bo_info_test[i])->bo_size = (bo_bucket_ptr)[i].bo_size;
-		(e->bo_info_test[i])->bo_offset = (bo_bucket_ptr)[i].bo_offset;
-		(e->bo_info_test[i])->bo_alloc_flags = (bo_bucket_ptr)[i].bo_alloc_flags;
-		(e->bo_info_test[i])->idr_handle = (bo_bucket_ptr)[i].idr_handle;
-		(e->bo_info_test[i])->user_addr = (bo_bucket_ptr)[i].user_addr;
-
-		e->bo_info_test[i]->gpu_id = maps_get_dest_gpu(&checkpoint_maps,
-							       bo_bucket_ptr[i].gpu_id);
-		if (!e->bo_info_test[i]->gpu_id) {
-			ret = -ENODEV;
-			goto failed;
-		}
-	}
-	e->num_of_bos = helper_args.num_of_bos;
-
-	plugin_log_msg("Dumping bo_info_test \n");
-	for (int i = 0; i < helper_args.num_of_bos; i++)
-	{
-		plugin_log_msg("e->bo_info_test[%d]:\n", i);
-		plugin_log_msg("bo_addr = 0x%lx, bo_size = 0x%lx, bo_offset = 0x%lx, gpu_id = 0x%x, "
-			"bo_alloc_flags = 0x%x, idr_handle = 0x%x\n",
-		  (e->bo_info_test[i])->bo_addr,
-		  (e->bo_info_test[i])->bo_size,
-		  (e->bo_info_test[i])->bo_offset,
-		  (e->bo_info_test[i])->gpu_id,
-		  (e->bo_info_test[i])->bo_alloc_flags,
-		  (e->bo_info_test[i])->idr_handle);
-		plugin_log_msg("(bo_bucket_ptr)[%d]:\n", i);
-		plugin_log_msg("bo_addr = 0x%llx, bo_size = 0x%llx, bo_offset = 0x%llx, "
-			"gpu_id = 0x%x, bo_alloc_flags = 0x%x, idr_handle = 0x%x\n",
-		  (bo_bucket_ptr)[i].bo_addr,
-		  (bo_bucket_ptr)[i].bo_size,
-		  (bo_bucket_ptr)[i].bo_offset,
-		  (bo_bucket_ptr)[i].gpu_id,
-		  (bo_bucket_ptr)[i].bo_alloc_flags,
-		  (bo_bucket_ptr)[i].idr_handle);
-
-	}
-
-	for (int i = 0; i < helper_args.num_of_devices; i++) {
-		struct tp_node *dev;
-		int ret_thread = 0;
-		thread_datas[i].gpu_id = devinfo_bucket_ptr[i].actual_gpu_id;
-		thread_datas[i].bo_buckets = bo_bucket_ptr;
-		thread_datas[i].bo_info_test = e->bo_info_test;
-		thread_datas[i].pid = e->pid;
-		thread_datas[i].num_of_bos = helper_args.num_of_bos;
-
-		dev = sys_get_node_by_gpu_id(&src_topology, thread_datas[i].gpu_id);
-		if (!dev) {
-			ret = -ENODEV;
-			goto failed;
-		}
-
-		thread_datas[i].drm_fd = node_get_drm_render_device(dev);
-		if (thread_datas[i].drm_fd < 0) {
-			ret = thread_datas[i].drm_fd;
-			goto failed;
-		}
-
-		ret_thread = pthread_create(&thread_datas[i].thread, NULL, dump_bo_contents, (void*) &thread_datas[i]);
-		if (ret_thread) {
-			pr_err("Failed to create thread[%i]\n", i);
-			ret = -ret_thread;
-			goto failed;
-		}
-	}
-
-	for (int i = 0; i < helper_args.num_of_devices; i++) {
-		pthread_join(thread_datas[i].thread, NULL);
-		pr_info("Thread[0x%x] finished ret:%d\n", thread_datas[i].gpu_id, thread_datas[i].ret);
-
-		if (thread_datas[i].ret) {
-			ret = thread_datas[i].ret;
-			goto failed;
-		}
-	}
+		goto exit;
 
 	ret = allocate_q_entries(e, helper_args.num_of_queues);
 	if (ret)
@@ -1322,7 +1342,6 @@ int amdgpu_plugin_dump_file(int fd, int id)
 exit:
 failed:
 	sys_close_drm_render_devices(&src_topology);
-	xfree(bo_bucket_ptr);
 	xfree(q_bucket_ptr);
 	if (ev_buckets_ptr)
 		xfree(ev_buckets_ptr);
@@ -1447,21 +1466,166 @@ exit:
 	return ret;
 }
 
+static int restore_bos(int fd, CriuKfd *e)
+{
+	struct kfd_ioctl_criu_restorer_args args = {0};
+	struct kfd_criu_bo_bucket *bo_buckets;
+	struct thread_data *thread_datas;
+	uint64_t priv_data_offset = 0;
+	uint64_t objects_size = 0;
+	uint8_t *priv_data;
+	int ret = 0;
+
+	pr_debug("Restoring %ld BOs\n", e->num_of_bos);
+
+	thread_datas = xzalloc(sizeof(*thread_datas) * e->num_of_gpus);
+	if (!thread_datas) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	for (int i = 0; i < e->num_of_bos; i++)
+		objects_size += sizeof(*bo_buckets) + e->bo_entries[i]->private_data.len;
+
+	ret = init_restorer_args(&args, KFD_CRIU_OBJECT_TYPE_BO, 0, e->num_of_bos, objects_size);
+	if (ret)
+		goto exit;
+
+	bo_buckets = (struct kfd_criu_bo_bucket*) args.objects;
+	priv_data = (uint8_t *)args.objects + (args.num_objects * sizeof(*bo_buckets));
+
+	for (int i = 0; i < args.num_objects; i++) {
+		struct kfd_criu_bo_bucket *bo_bucket = &bo_buckets[i];
+		BoEntry *boinfo = e->bo_entries[i];
+
+		bo_bucket->priv_data_size = boinfo->private_data.len;
+		bo_bucket->priv_data_offset = priv_data_offset;
+		priv_data_offset += bo_bucket->priv_data_size;
+
+		memcpy(priv_data + bo_bucket->priv_data_offset,
+		       boinfo->private_data.data,
+		       bo_bucket->priv_data_size);
+
+		bo_bucket->gpu_id = maps_get_dest_gpu(&restore_maps, boinfo->gpu_id);
+		if (!bo_bucket->gpu_id) {
+			ret = -ENODEV;
+			goto exit;
+		}
+
+		bo_bucket->addr = boinfo->addr;
+		bo_bucket->size = boinfo->size;
+		bo_bucket->offset = boinfo->offset;
+		bo_bucket->alloc_flags = boinfo->alloc_flags;
+
+		plugin_log_msg("BO [%d] gpu_id:%x addr:%llx size:%llx offset:%llx\n",
+					i,
+					bo_bucket->gpu_id,
+					bo_bucket->addr,
+					bo_bucket->size,
+					bo_bucket->offset);
+	}
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_RESTORER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call restorer (bos) ioctl");
+		goto exit;
+	}
+
+	for (int i = 0; i < args.num_objects; i++) {
+		struct kfd_criu_bo_bucket *bo_bucket = &bo_buckets[i];
+		if (bo_bucket->alloc_flags & (KFD_IOC_ALLOC_MEM_FLAGS_VRAM |
+					      KFD_IOC_ALLOC_MEM_FLAGS_GTT |
+					      KFD_IOC_ALLOC_MEM_FLAGS_MMIO_REMAP |
+					      KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL)) {
+
+			struct tp_node *tp_node;
+			struct vma_metadata *vma_md;
+			vma_md = xmalloc(sizeof(*vma_md));
+			if (!vma_md) {
+				ret = -ENOMEM;
+				goto exit;
+			}
+
+			memset(vma_md, 0, sizeof(*vma_md));
+
+			vma_md->old_pgoff = bo_bucket->offset;
+			vma_md->vma_entry = bo_bucket->addr;
+
+			tp_node = sys_get_node_by_gpu_id(&dest_topology, bo_bucket->gpu_id);
+			if (!tp_node) {
+				pr_err("Failed to find node with gpu_id:0x%04x\n", bo_bucket->gpu_id);
+				ret = -ENODEV;
+				goto exit;
+			}
+
+			vma_md->new_minor = tp_node->drm_render_minor;
+			vma_md->new_pgoff = bo_bucket->restored_offset;
+
+			plugin_log_msg("amdgpu_plugin: adding vma_entry:addr:0x%lx old-off:0x%lx\
+					new_off:0x%lx new_minor:%d\n", vma_md->vma_entry,
+					vma_md->old_pgoff, vma_md->new_pgoff, vma_md->new_minor);
+
+			list_add_tail(&vma_md->list, &update_vma_info_list);
+		}
+	}
+
+	for (int i = 0; i < e->num_of_gpus; i++) {
+		struct tp_node *dev;
+		int ret_thread = 0;
+
+		dev = sys_get_node_by_index(&dest_topology, i);
+		if (!dev) {
+			ret = -ENODEV;
+			goto exit;
+		}
+
+		thread_datas[i].gpu_id = dev->gpu_id;
+		thread_datas[i].bo_buckets = bo_buckets;
+		thread_datas[i].bo_entries = e->bo_entries;
+		thread_datas[i].pid = e->pid;
+		thread_datas[i].num_of_bos = e->num_of_bos;
+
+		thread_datas[i].drm_fd = node_get_drm_render_device(dev);
+		if (thread_datas[i].drm_fd < 0) {
+			ret = -thread_datas[i].drm_fd;
+			goto exit;
+		}
+
+		ret_thread = pthread_create(&thread_datas[i].thread, NULL, restore_bo_contents, (void*) &thread_datas[i]);
+		if (ret_thread) {
+			pr_err("Failed to create thread[%i]\n", i);
+			fd = -ret_thread;
+			goto exit;
+		}
+	}
+
+	for (int i = 0; i < e->num_of_gpus; i++) {
+		pthread_join(thread_datas[i].thread, NULL);
+		pr_info("Thread[0x%x] finished ret:%d\n", thread_datas[i].gpu_id, thread_datas[i].ret);
+
+		if (thread_datas[i].ret) {
+			ret = thread_datas[i].ret;
+			goto exit;
+		}
+	}
+exit:
+	xfree(thread_datas);
+	xfree((void*)args.objects);
+	pr_info("Restore BOs %s (ret:%d)\n", ret ? "Failed" : "Ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_restore_file(int id)
 {
 	int ret = 0, fd;
 	struct kfd_ioctl_criu_restorer_args args = {0};
-	struct kfd_criu_bo_buckets *bo_bucket_ptr;
 	struct kfd_criu_q_bucket *q_bucket_ptr;
 	struct kfd_criu_ev_bucket *ev_bucket_ptr = NULL;
-	__u64 *restored_bo_offsets_array;
 	char img_path[PATH_MAX];
 	struct stat filestat;
 	unsigned char *buf;
 	CriuRenderNode *rd;
 	CriuKfd *e;
-	struct thread_data thread_datas[NUM_OF_SUPPORTED_GPUS];
-	memset(thread_datas, 0, sizeof(thread_datas));
 
 	pr_info("amdgpu_plugin: Initialized kfd plugin restorer with ID = %d\n", id);
 
@@ -1585,53 +1749,9 @@ fail:
 	if (ret)
 		goto exit;
 
-	for (int i = 0; i < e->num_of_bos; i++ )
-	{
-		plugin_log_msg("reading e->bo_info_test[%d]:\n", i);
-		plugin_log_msg("bo_addr = 0x%lx, bo_size = 0x%lx, bo_offset = 0x%lx, "
-			"gpu_id = 0x%x, bo_alloc_flags = 0x%x, idr_handle = 0x%x user_addr=0x%lx\n",
-		  (e->bo_info_test[i])->bo_addr,
-		  (e->bo_info_test[i])->bo_size,
-		  (e->bo_info_test[i])->bo_offset,s
-		  (e->bo_info_test[i])->gpu_id,
-		  (e->bo_info_test[i])->bo_alloc_flags,
-		  (e->bo_info_test[i])->idr_handle,
-		  (e->bo_info_test[i])->user_addr);
-	}
-
-	bo_bucket_ptr = xmalloc(e->num_of_bos * sizeof(*bo_bucket_ptr));
-	if (!bo_bucket_ptr) {
-		pr_perror("amdgpu_plugin: failed to allocate args for restorer ioctl\n");
-		return -1;
-	}
-
-	for (int i = 0; i < e->num_of_bos; i++)
-	{
-		(bo_bucket_ptr)[i].bo_addr = (e->bo_info_test[i])->bo_addr;
-		(bo_bucket_ptr)[i].bo_size = (e->bo_info_test[i])->bo_size;
-		(bo_bucket_ptr)[i].bo_offset = (e->bo_info_test[i])->bo_offset;
-		(bo_bucket_ptr)[i].bo_alloc_flags = (e->bo_info_test[i])->bo_alloc_flags;
-		(bo_bucket_ptr)[i].idr_handle = (e->bo_info_test[i])->idr_handle;
-		(bo_bucket_ptr)[i].user_addr = (e->bo_info_test[i])->user_addr;
-
-		bo_bucket_ptr[i].gpu_id =
-				maps_get_dest_gpu(&restore_maps, e->bo_info_test[i]->gpu_id);
-		if (!bo_bucket_ptr[i].gpu_id) {
-			fd = -ENODEV;
-			goto clean;
-		}
-	}
-
-	args.num_of_bos = e->num_of_bos;
-	args.kfd_criu_bo_buckets_ptr = (uintptr_t)bo_bucket_ptr;
-
-	restored_bo_offsets_array = xmalloc(sizeof(uint64_t) * e->num_of_bos);
-	if (!restored_bo_offsets_array) {
-		xfree(bo_bucket_ptr);
-		return -ENOMEM;
-	}
-
-	args.restored_bo_array_ptr = (uint64_t)restored_bo_offsets_array;
+	ret = restore_bos(fd, e);
+	if (ret)
+		goto exit;
 
 	q_bucket_ptr = xmalloc(e->num_of_queues * sizeof(*q_bucket_ptr));
         if (!q_bucket_ptr) {
@@ -1791,75 +1911,9 @@ fail:
 		goto clean;
 	}
 
-	for (int i = 0; i < e->num_of_bos; i++)
-	{
-		if (e->bo_info_test[i]->bo_alloc_flags &
-			(KFD_IOC_ALLOC_MEM_FLAGS_VRAM |
-			 KFD_IOC_ALLOC_MEM_FLAGS_GTT |
-			 KFD_IOC_ALLOC_MEM_FLAGS_MMIO_REMAP |
-			 KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL)) {
-
-			struct tp_node *tp_node;
-			struct vma_metadata *vma_md;
-			vma_md = xmalloc(sizeof(*vma_md));
-			if (!vma_md)
-				return -ENOMEM;
-
-			memset(vma_md, 0, sizeof(*vma_md));
-
-			vma_md->old_pgoff = bo_bucket_ptr[i].bo_offset;
-			vma_md->vma_entry = bo_bucket_ptr[i].bo_addr;
-
-			tp_node = sys_get_node_by_gpu_id(&dest_topology, bo_bucket_ptr[i].gpu_id);
-			if (!tp_node) {
-				pr_err("Failed to find node with gpu_id:0x%04x\n", bo_bucket_ptr[i].gpu_id);
-				fd = -ENODEV;
-				goto clean;
-			}
-			vma_md->new_minor = tp_node->drm_render_minor;
-
-			vma_md->new_pgoff = restored_bo_offsets_array[i];
-
-			plugin_log_msg("amdgpu_plugin: adding vma_entry:addr:0x%lx old-off:0x%lx \
-					new_off:0x%lx new_minor:%d\n", vma_md->vma_entry,
-					vma_md->old_pgoff, vma_md->new_pgoff, vma_md->new_minor);
-
-			list_add_tail(&vma_md->list, &update_vma_info_list);
-		}
-	} /* mmap done for VRAM BO */
-
 	if (restore_hsakmt_shared_mem(e->shared_mem_size, e->shared_mem_magic)) {
 		fd = -EBADFD;
 		goto clean;
-	}
-
-	for (int i = 0; i < e->num_of_gpus; i++) {
-		int ret_thread = 0;
-
-		thread_datas[i].gpu_id = devinfo_bucket_ptr[i].actual_gpu_id;
-		thread_datas[i].bo_buckets = bo_bucket_ptr;
-		thread_datas[i].bo_info_test = e->bo_info_test;
-		thread_datas[i].pid = e->pid;
-		thread_datas[i].num_of_bos = e->num_of_bos;
-		thread_datas[i].restored_bo_offsets = restored_bo_offsets_array;
-		thread_datas[i].drm_fd = devinfo_bucket_ptr[i].drm_fd;
-
-		ret_thread = pthread_create(&thread_datas[i].thread, NULL, restore_bo_contents, (void*) &thread_datas[i]);
-		if (ret_thread) {
-			pr_err("Failed to create thread[%i]\n", i);
-			fd = -ret_thread;
-			goto clean;
-		}
-	}
-
-	for (int i = 0; i < e->num_of_gpus; i++) {
-		pthread_join(thread_datas[i].thread, NULL);
-		pr_info("Thread[0x%x] finished ret:%d\n", thread_datas[i].gpu_id, thread_datas[i].ret);
-
-		if (thread_datas[i].ret) {
-			fd = thread_datas[i].ret;
-			goto clean;
-		}
 	}
 
 clean:
@@ -1869,8 +1923,6 @@ exit:
 		xfree(ev_bucket_ptr);
 	if (q_bucket_ptr)
 		xfree(q_bucket_ptr);
-	xfree(restored_bo_offsets_array);
-	xfree(bo_bucket_ptr);
 	xfree(buf);
 	if (args.queues_data_ptr)
 		xfree((void*)args.queues_data_ptr);

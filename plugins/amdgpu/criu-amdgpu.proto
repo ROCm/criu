@@ -45,15 +45,14 @@ message device_entry {
 	required bytes private_data = 33;
 }
 
-message bo_entries_test {
-	required uint64	bo_addr = 1;
-	required uint64	bo_size = 2;
-	required uint64	bo_offset = 3;
-	required uint32 bo_alloc_flags = 4;
+message bo_entry {
+	required uint64	addr = 1;
+	required uint64	size = 2;
+	required uint64	offset = 3;
+	required uint32 alloc_flags = 4;
 	required uint32 gpu_id = 5;
-	required uint32 idr_handle = 6;
-	required uint64 user_addr = 7;
-	required bytes bo_rawdata = 8;
+	required bytes rawdata = 6;
+	required bytes private_data = 7;
 }
 
 message q_entry {
@@ -107,7 +106,7 @@ message criu_kfd {
 	required uint32 num_of_cpus = 4;
 	repeated device_entry device_entries = 5;
 	required uint64	num_of_bos = 6;
-	repeated bo_entries_test bo_info_test = 7;
+	repeated bo_entry bo_entries = 7;
 	required uint32	num_of_queues = 8;
 	repeated q_entry q_entries = 9;
 	required uint64 event_page_offset = 10;
