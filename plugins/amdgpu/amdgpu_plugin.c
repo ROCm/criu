@@ -178,7 +178,27 @@ static void free_e(CriuKfd *e)
 		if (e->ev_entries[i])
 			xfree(e->ev_entries[i]);
 	}
+
+	if (e->process_entry) {
+		if (e->process_entry->private_data.data)
+			xfree(e->process_entry->private_data.data);
+
+		xfree(e->process_entry);
+	}
 	xfree(e);
+}
+
+static int allocate_process_entry(CriuKfd *e)
+{
+	ProcessEntry *entry = xzalloc(sizeof(*entry));
+	if (!entry) {
+		pr_err("Failed to allocate entry\n");
+		return -ENOMEM;
+	}
+
+	process_entry__init(entry);
+	e->process_entry = entry;
+	return 0;
 }
 
 static int allocate_devinfo_entries(CriuKfd *e, int num_of_devices)
@@ -740,6 +760,90 @@ int restore_hsakmt_shared_mem(const uint64_t shared_mem_size, const uint32_t sha
 	return 0;
 }
 
+static int init_dumper_args(struct kfd_ioctl_criu_dumper_args *args, __u32 type, __u64 index_start,
+			    __u64 num_objects, __u64 objects_size)
+{
+	memset(args, 0, sizeof(*args));
+
+	args->type = type;
+	/* Partial object lists not supported for now so index_start should always be 0 */
+	args->objects_index_start = index_start;
+
+	args->num_objects = num_objects;
+	args->objects_size = objects_size;
+
+	args->objects = (uintptr_t)xzalloc(args->objects_size);
+	if (!args->objects)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static int init_restorer_args(struct kfd_ioctl_criu_restorer_args *args, __u32 type,
+			      __u64 index_start, __u64 num_objects, __u64 objects_size)
+{
+	memset(args, 0, sizeof(*args));
+
+	args->type = type;
+	/* Partial object lists not supported for now so index_start should always be 0 */
+	args->objects_index_start = index_start;
+
+	args->num_objects = num_objects;
+	args->objects_size = objects_size;
+
+	args->objects = (uintptr_t)xzalloc(args->objects_size);
+	if (!args->objects)
+		return -ENOMEM;
+
+	return 0;
+}
+
+
+static int dump_process(int fd, struct kfd_ioctl_criu_process_info_args *info_args, CriuKfd *e)
+{
+	struct kfd_criu_process_bucket *process_bucket;
+	struct kfd_ioctl_criu_dumper_args args;
+	uint8_t *priv_data;
+	int ret = 0;
+
+	pr_debug("Dump process\n");
+
+	ret = init_dumper_args(&args, KFD_CRIU_OBJECT_TYPE_PROCESS, 0, 1,
+			 sizeof(*process_bucket) + info_args->process_priv_data_size);
+
+	if (ret)
+		goto exit;
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_DUMPER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call dumper (process) ioctl");
+		goto exit;
+	}
+
+	ret = allocate_process_entry(e);
+	if (ret)
+		goto exit;
+
+	process_bucket = (struct kfd_criu_process_bucket*)args.objects;
+	/* First private data starts after all buckets */
+	priv_data = (uint8_t *)args.objects + sizeof(*process_bucket);
+
+	e->process_entry->private_data.len = process_bucket->priv_data_size;
+	e->process_entry->private_data.data = xmalloc(e->process_entry->private_data.len);
+	if (!e->process_entry->private_data.data) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	memcpy(e->process_entry->private_data.data,
+		priv_data + process_bucket->priv_data_offset,
+		e->process_entry->private_data.len);
+exit:
+	xfree((void*)args.objects);
+	pr_info("Dumped process %s (ret:%d)\n", ret ? "Failed" : "Ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_dump_file(int fd, int id)
 {
 	struct kfd_ioctl_criu_process_info_args info_args = {0};
@@ -905,6 +1009,10 @@ int amdgpu_plugin_dump_file(int fd, int id)
 
 	criu_kfd__init(e);
 	e->pid = info_args.task_pid;
+
+	ret = dump_process(fd, &info_args, e);
+	if (ret)
+		goto exit;
 
 	/* When checkpointing on a node where there was already a checkpoint-restore before, the
 	 * user_gpu_id and actual_gpu_id will be different.
@@ -1147,6 +1255,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 		ret = -1;
 
 	xfree(buf);
+exit:
 failed:
 	sys_close_drm_render_devices(&src_topology);
 	xfree(devinfo_bucket_ptr);
@@ -1161,10 +1270,45 @@ failed:
 }
 CR_PLUGIN_REGISTER_HOOK(CR_PLUGIN_HOOK__DUMP_EXT_FILE, amdgpu_plugin_dump_file)
 
+static int restore_process(int fd, CriuKfd *e)
+{
+	struct kfd_criu_process_bucket *process_bucket;
+	struct kfd_ioctl_criu_restorer_args args;
+	uint8_t *priv_data;
+	int ret = 0;
+
+	pr_debug("Restore process\n");
+
+	ret = init_restorer_args(&args, KFD_CRIU_OBJECT_TYPE_PROCESS, 0, 1,
+			sizeof(*process_bucket) + e->process_entry->private_data.len);
+
+	if (ret)
+		goto exit;
+
+	process_bucket = (struct kfd_criu_process_bucket*)args.objects;
+	/* First private data starts after all buckets */
+	priv_data = (uint8_t *)args.objects + sizeof(*process_bucket);
+
+	process_bucket->priv_data_offset = 0;
+	process_bucket->priv_data_size = e->process_entry->private_data.len;
+
+	memcpy(priv_data, e->process_entry->private_data.data, e->process_entry->private_data.len);
+
+	ret = kmtIoctl(fd, AMDKFD_IOC_CRIU_RESTORER, &args);
+	if (ret) {
+		pr_perror("amdgpu_plugin: Failed to call restorer (process) ioctl");
+		goto exit;
+	}
+
+exit:
+	pr_info("Restore process %s (ret:%d)\n", ret ? "Failed" : "Ok", ret);
+	return ret;
+}
+
 int amdgpu_plugin_restore_file(int id)
 {
 	struct kfd_criu_devinfo_bucket *devinfo_bucket_ptr = NULL;
-	int fd;
+	int ret = 0, fd;
 	struct kfd_ioctl_criu_restorer_args args = {0};
 	struct kfd_criu_bo_buckets *bo_bucket_ptr;
 	struct kfd_criu_q_bucket *q_bucket_ptr;
@@ -1300,6 +1444,10 @@ fail:
 		fd = -EBADFD;
 		goto clean;
 	}
+
+	ret = restore_process(fd, e);
+	if (ret)
+		goto exit;
 
 	int bucket_index = 0;
 	for (int entries_index = 0; entries_index < e->num_of_gpus + e->num_of_cpus; entries_index++) {
@@ -1613,6 +1761,7 @@ fail:
 	}
 
 clean:
+exit:
 	sys_close_drm_render_devices(&dest_topology);
 	xfree(devinfo_bucket_ptr);
 	if (ev_bucket_ptr)
