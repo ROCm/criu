@@ -467,100 +467,97 @@ struct kfd_ioctl_smi_events_args {
 	__u32 anon_fd;	/* from KFD */
 };
 
-struct kfd_criu_devinfo_bucket {
+struct kfd_criu_process_bucket {
+	__u64 priv_data_offset;
+	__u64 priv_data_size;
+};
+
+struct kfd_criu_device_bucket {
+	__u64 priv_data_offset;
+	__u64 priv_data_size;
 	__u32 user_gpu_id;
 	__u32 actual_gpu_id;
 	__u32 drm_fd;
+	__u32 pad;
 };
 
-struct kfd_criu_bo_buckets {
-	__u64 bo_addr;  /* from KFD */
-	__u64 bo_size;  /* from KFD */
-	__u64 bo_offset;/* from KFD */
-	__u64 user_addr; /* from KFD */
-	__u32 bo_alloc_flags;/* from KFD */
-	__u32 gpu_id;/* from KFD */
-	__u32 idr_handle;/* from KFD */
-};
-
-struct kfd_criu_q_bucket {
-	__u64 q_address;
-	__u64 q_size;
-	__u64 read_ptr_addr;
-	__u64 write_ptr_addr;
-	__u64 doorbell_off;
-	__u64 eop_ring_buffer_address;		/* Relevant only for VI */
-	__u64 ctx_save_restore_area_address;	/* Relevant only for VI */
-	__u64 queues_data_offset;
+struct kfd_criu_bo_bucket {
+	__u64 priv_data_offset;
+	__u64 priv_data_size;
+	__u64 addr;
+	__u64 size;
+	__u64 offset;
+	__u64 restored_offset;
 	__u32 gpu_id;
-	__u32 type;
-	__u32 format;
-	__u32 q_id;
-	__u32 priority;
-	__u32 q_percent;
-	__u32 doorbell_id;
-	__u32 is_gws;				/* TODO Implement me */
-	__u32 sdma_id;			/* Relevant only for sdma queues*/
-	__u32 eop_ring_buffer_size;		/* Relevant only for VI */
-	__u32 ctx_save_restore_area_size;	/* Relevant only for VI */
-	__u32 ctl_stack_size;			/* Relevant only for VI */
-	__u32 cu_mask_size;
-	__u32 mqd_size;
+	__u32 alloc_flags;
+	__u32 dmabuf_handle;
+	__u32 pad;
 };
 
-struct kfd_criu_ev_bucket {
-	__u32 event_id;
-	__u32 auto_reset;
-	__u32 type;
-	__u32 signaled;
+struct kfd_criu_queue_bucket {
+	__u64 priv_data_offset;
+	__u64 priv_data_size;
+	__u32 gpu_id;
+	__u32 pad;
+};
 
-	union {
-		struct kfd_hsa_memory_exception_data memory_exception_data;
-		struct kfd_hsa_hw_exception_data hw_exception_data;
-	};
+struct kfd_criu_event_bucket {
+	__u64 priv_data_offset;
+	__u64 priv_data_size;
+	__u32 gpu_id;
+	__u32 pad;
+};
+
+struct kfd_ioctl_criu_process_info_args {
+	__u64 process_priv_data_size;
+	__u64 bos_priv_data_size;
+	__u64 devices_priv_data_size;
+	__u64 queues_priv_data_size;
+	__u64 events_priv_data_size;
+	__u64 svm_ranges_priv_data_size;
+	__u64 total_bos;
+	__u64 total_svm_ranges;
+	__u32 total_devices;
+	__u32 total_queues;
+	__u32 total_events;
+	__u32 task_pid;
+};
+
+struct kfd_ioctl_criu_pause_args {
+	__u32 pause;
+	__u32 pad;
+};
+
+enum kfd_criu_object_type {
+	KFD_CRIU_OBJECT_TYPE_PROCESS	= 0,
+	KFD_CRIU_OBJECT_TYPE_DEVICE	= 1,
+	KFD_CRIU_OBJECT_TYPE_BO		= 2,
+	KFD_CRIU_OBJECT_TYPE_QUEUE	= 3,
+	KFD_CRIU_OBJECT_TYPE_EVENT	= 4,
+	KFD_CRIU_OBJECT_TYPE_SVM_RANGE	= 5,
 };
 
 struct kfd_ioctl_criu_dumper_args {
-	__u64 num_of_bos;
-	__u64 kfd_criu_bo_buckets_ptr;
-	__u64 kfd_criu_q_buckets_ptr;
-	__u64 kfd_criu_ev_buckets_ptr;
-	__u64 kfd_criu_devinfo_buckets_ptr;
-	__u64 queues_data_size;
-	__u64 queues_data_ptr;
-	__u64 event_page_offset;
-	__u32 num_of_queues;
-	__u32 num_of_devices;
-	__u32 num_of_events;
+	__u64 num_objects;
+	__u64 objects;
+	__u64 objects_size;
+	__u64 objects_index_start;
+	__u32 type; /* enum kfd_criu_object_type */
+	__u32 pad;
 };
 
 struct kfd_ioctl_criu_restorer_args {
-	__u64 handle;   /* from KFD */
-	__u64 num_of_bos;
-	__u64 kfd_criu_bo_buckets_ptr;
-	__u64 restored_bo_array_ptr;
-	__u64 kfd_criu_q_buckets_ptr;
-	__u64 kfd_criu_ev_buckets_ptr;
-	__u64 kfd_criu_devinfo_buckets_ptr;
-	__u64 queues_data_size;
-	__u64 queues_data_ptr;
-	__u64 event_page_offset;
-	__u32 num_of_devices;
-	__u32 num_of_queues;
-	__u32 num_of_events;
-};
-
-struct kfd_ioctl_criu_helper_args {
-	__u64 num_of_bos;	/* from KFD */
-	__u64 queues_data_size;
-	__u32 task_pid;
-	__u32 num_of_devices;
-	__u32 num_of_queues;    /* from KFD */
-	__u32 num_of_events;	/* from KFD */
+	__u64 num_objects;
+	__u64 objects;
+	__u64 objects_size;
+	__u64 objects_index_start;
+	__u32 type; /* enum kfd_criu_object_type */
+	__u32 pad;
 };
 
 struct kfd_ioctl_criu_resume_args {
 	__u32 pid;	/* to KFD */
+	__u32 pad;
 };
 
 /* Register offset inside the remapped mmio page
@@ -842,11 +839,14 @@ struct kfd_ioctl_set_xnack_mode_args {
 #define AMDKFD_IOC_CRIU_RESTORER			\
 		AMDKFD_IOWR(0x23, struct kfd_ioctl_criu_restorer_args)
 
-#define AMDKFD_IOC_CRIU_HELPER			\
-		AMDKFD_IOWR(0x24, struct kfd_ioctl_criu_helper_args)
+#define AMDKFD_IOC_CRIU_PROCESS_INFO			\
+		AMDKFD_IOWR(0x24, struct kfd_ioctl_criu_process_info_args)
 
 #define AMDKFD_IOC_CRIU_RESUME			\
 		AMDKFD_IOWR(0x25, struct kfd_ioctl_criu_resume_args)
+
+#define AMDKFD_IOC_CRIU_PAUSE			\
+		AMDKFD_IOW(0x26, struct kfd_ioctl_criu_pause_args)
 
 #define AMDKFD_COMMAND_START		0x01
 #define AMDKFD_COMMAND_END		0x26
