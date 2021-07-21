@@ -123,6 +123,7 @@ int set_restore_gpu_maps(struct tp_system *tp_checkpoint,
 			 struct device_maps *maps);
 
 uint32_t maps_get_dest_gpu(const struct device_maps *maps, const uint32_t src_id);
+uint32_t maps_get_src_gpu(const struct device_maps *maps, const uint32_t dest_id);
 
 void maps_init(struct device_maps *maps);
 void maps_free(struct device_maps *maps);

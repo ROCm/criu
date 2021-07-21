@@ -51,8 +51,8 @@ message bo_entry {
 	required uint64	offset = 3;
 	required uint32 alloc_flags = 4;
 	required uint32 gpu_id = 5;
-	required bytes rawdata = 6;
-	required bytes private_data = 7;
+	required bytes private_data = 6;
+	required uint64 stored_offset = 7;
 }
 
 message q_entry {

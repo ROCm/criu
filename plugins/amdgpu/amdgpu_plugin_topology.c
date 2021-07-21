@@ -252,6 +252,16 @@ uint32_t maps_get_dest_gpu(const struct device_maps *maps, const uint32_t src_id
 	return 0;
 }
 
+uint32_t maps_get_src_gpu(const struct device_maps *maps, const uint32_t dest_id)
+{
+	struct id_map *id_map;
+	list_for_each_entry(id_map, &maps->gpu_maps, listm) {
+		if (id_map->dest == dest_id)
+			return id_map->src;
+	}
+	return 0;
+}
+
 static struct id_map *maps_add_cpu_entry(struct device_maps *maps, const uint32_t src_id, const uint32_t dest_id)
 {
 	struct id_map *id_map = xzalloc(sizeof(*id_map));
