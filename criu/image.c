@@ -428,6 +428,7 @@ static int do_open_image(struct cr_img *img, int dfd, int type, unsigned long of
 	flags = oflags & ~(O_NOBUF | O_SERVICE | O_FORCE_LOCAL);
 
 	if (opts.stream && !(oflags & O_FORCE_LOCAL)) {
+		pr_err("DYSDEBUG calling img_streamer_open for path:%s\n", path);
 		ret = img_streamer_open(path, flags);
 		errno = EIO; /* errno value is meaningless, only the ret value is meaningful */
 	} else if (root_ns_mask & CLONE_NEWUSER &&
