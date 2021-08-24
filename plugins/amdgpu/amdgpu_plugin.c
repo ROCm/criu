@@ -77,6 +77,7 @@ struct vma_metadata {
 	uint32_t new_minor;
 };
 
+TEST
 /************************************ Global Variables ********************************************/
 struct tp_system src_topology;
 struct tp_system dest_topology;
