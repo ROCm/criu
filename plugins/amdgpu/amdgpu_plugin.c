@@ -63,6 +63,8 @@
 #define SDMA_NOP                       0
 #define SDMA_LINEAR_COPY_MAX_SIZE      (1ULL << 21)
 
+//TEST
+
 enum sdma_op_type {
        SDMA_OP_VRAM_READ,
        SDMA_OP_VRAM_WRITE,
