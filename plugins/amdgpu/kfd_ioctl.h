@@ -464,14 +464,58 @@ struct kfd_ioctl_smi_events_args {
 	__u32 anon_fd; /* from KFD */
 };
 
-struct kfd_criu_process_bucket {
-	__u64 priv_data_offset;
-	__u64 priv_data_size;
+
+/**************************************************************************************************
+ * CRIU IOCTLs (Checkpoint Restore In Userspace)
+ *
+ * When checkpointing a process, the userspace application will perform:
+ * 1. PROCESS_INFO op to determine current process information
+ * 2. CHECKPOINT op to checkpoint process contents (BOs, queues, events, svm-ranges)
+ * 3. UNPAUSE op to un-evict all the queues
+ *
+ * When restoring a process, the CRIU userspace application will perform:
+ *
+ * 1. RESTORE ioctl to restore process contents
+ * 2. RESUME ioctl to start the process
+ *
+ * Note: Queues are forced into an evicted state after a successful PROCESS_INFO. If user
+ * application need to perform an UNPAUSE operation to complete or abort a checkpoint.
+ */
+
+enum kfd_criu_op {
+	KFD_CRIU_OP_PROCESS_INFO,
+	KFD_CRIU_OP_CHECKPOINT,
+	KFD_CRIU_OP_UNPAUSE,
+	KFD_CRIU_OP_RESTORE,
+	KFD_CRIU_OP_RESUME,
+};
+
+/**
+ * kfd_ioctl_criu_args - Arguments perform CRIU operation
+ * @devices:		[in/out] User pointer to memory location for devices information
+ * @bos:		[in/out] User pointer to memory location for BOs information
+ * @priv_data:		[in/out] User pointer to memory location for private data
+ * @priv_data_size:	[in/out] Size of priv_data in bytes
+ * @num_devices:	[in/out] Number of GPUs used by process
+ * @num_bos		[in/out] Number of BOs used by process
+ * @num_objects:	[in/out] Number of objects used by process. Objects are opaque to
+ *				 user application
+ * @pid:		[in/out] PID of the process being checkpointed/restored
+ * @op			[in] Type of operation (kfd_criu_op)
+ */
+struct kfd_ioctl_criu_args {
+	__u64 devices;		/* Used during ops: CHECKPOINT, RESTORE */
+	__u64 bos;		/* Used during ops: CHECKPOINT, RESTORE */
+	__u64 priv_data;	/* Used during ops: CHECKPOINT, RESTORE */
+	__u64 priv_data_size;	/* Used during ops: PROCESS_INFO, RESTORE */
+	__u32 num_devices;	/* Used during ops: PROCESS_INFO, RESTORE */
+	__u32 num_bos;		/* Used during ops: PROCESS_INFO, RESTORE */
+	__u32 num_objects;	/* Used during ops: PROCESS_INFO, RESTORE */
+	__u32 pid;		/* Used during ops: PROCESS_INFO, RESTORE */
+	__u32 op;
 };
 
 struct kfd_criu_device_bucket {
-	__u64 priv_data_offset;
-	__u64 priv_data_size;
 	__u32 user_gpu_id;
 	__u32 actual_gpu_id;
 	__u32 drm_fd;
@@ -479,83 +523,18 @@ struct kfd_criu_device_bucket {
 };
 
 struct kfd_criu_bo_bucket {
-	__u64 priv_data_offset;
-	__u64 priv_data_size;
 	__u64 addr;
 	__u64 size;
 	__u64 offset;
-	__u64 restored_offset;
+	__u64 restored_offset;    /* During restore, updated offset for BO */
 	__u32 gpu_id;
 	__u32 alloc_flags;
 	__u32 dmabuf_fd;
 	__u32 pad;
 };
 
-struct kfd_criu_queue_bucket {
-	__u64 priv_data_offset;
-	__u64 priv_data_size;
-	__u32 gpu_id;
-	__u32 pad;
-};
-
-struct kfd_criu_event_bucket {
-	__u64 priv_data_offset;
-	__u64 priv_data_size;
-	__u32 gpu_id;
-	__u32 pad;
-};
-
-struct kfd_ioctl_criu_process_info_args {
-	__u64 process_priv_data_size;
-	__u64 bos_priv_data_size;
-	__u64 devices_priv_data_size;
-	__u64 queues_priv_data_size;
-	__u64 events_priv_data_size;
-	__u64 svm_ranges_priv_data_size;
-	__u64 total_bos;
-	__u64 total_svm_ranges;
-	__u32 total_devices;
-	__u32 total_queues;
-	__u32 total_events;
-	__u32 task_pid;
-};
-
-struct kfd_ioctl_criu_pause_args {
-	__u32 pause;
-	__u32 pad;
-};
-
-enum kfd_criu_object_type {
-	KFD_CRIU_OBJECT_TYPE_PROCESS = 0,
-	KFD_CRIU_OBJECT_TYPE_DEVICE = 1,
-	KFD_CRIU_OBJECT_TYPE_BO = 2,
-	KFD_CRIU_OBJECT_TYPE_QUEUE = 3,
-	KFD_CRIU_OBJECT_TYPE_EVENT = 4,
-	KFD_CRIU_OBJECT_TYPE_SVM_RANGE = 5,
-};
-
-struct kfd_ioctl_criu_dumper_args {
-	__u64 num_objects;
-	__u64 objects;
-	__u64 objects_size;
-	__u64 objects_index_start;
-	__u32 type; /* enum kfd_criu_object_type */
-	__u32 pad;
-};
-
-struct kfd_ioctl_criu_restorer_args {
-	__u64 num_objects;
-	__u64 objects;
-	__u64 objects_size;
-	__u64 objects_index_start;
-	__u32 type; /* enum kfd_criu_object_type */
-	__u32 pad;
-};
-
-struct kfd_ioctl_criu_resume_args {
-	__u32 pid; /* to KFD */
-	__u32 pad;
-};
+/* CRIU IOCTLs - END */
+/**************************************************************************************************/
 
 /* Register offset inside the remapped mmio page
  */
@@ -791,15 +770,8 @@ struct kfd_ioctl_set_xnack_mode_args {
 
 #define AMDKFD_IOC_SET_XNACK_MODE AMDKFD_IOWR(0x21, struct kfd_ioctl_set_xnack_mode_args)
 
-#define AMDKFD_IOC_CRIU_DUMPER AMDKFD_IOWR(0x22, struct kfd_ioctl_criu_dumper_args)
-
-#define AMDKFD_IOC_CRIU_RESTORER AMDKFD_IOWR(0x23, struct kfd_ioctl_criu_restorer_args)
-
-#define AMDKFD_IOC_CRIU_PROCESS_INFO AMDKFD_IOWR(0x24, struct kfd_ioctl_criu_process_info_args)
-
-#define AMDKFD_IOC_CRIU_RESUME AMDKFD_IOWR(0x25, struct kfd_ioctl_criu_resume_args)
-
-#define AMDKFD_IOC_CRIU_PAUSE AMDKFD_IOW(0x26, struct kfd_ioctl_criu_pause_args)
+#define AMDKFD_IOC_CRIU_OP			\
+		AMDKFD_IOWR(0x22, struct kfd_ioctl_criu_args)
 
 #define AMDKFD_COMMAND_START 0x01
 #define AMDKFD_COMMAND_END   0x26
