@@ -100,11 +100,34 @@ extern bool kfd_numa_check;
 
 /**************************************************************************************************/
 
+int write_fp(FILE *fp, const void *buf, const size_t buf_len)
+{
+	size_t len_write;
+
+	len_write = fwrite(buf, 1, buf_len, fp);
+	if (len_write != buf_len) {
+		pr_perror("Unable to write file (wrote:%ld buf_len:%ld)", len_write, buf_len);
+		return -EIO;
+	}
+	return 0;
+}
+
+int read_fp(FILE *fp, void *buf, const size_t buf_len)
+{
+	size_t len_read;
+
+	len_read = fread(buf, 1, buf_len, fp);
+	if (len_read != buf_len) {
+		pr_perror("Unable to read file (read:%ld buf_len:%ld)", len_read, buf_len);
+		return -EIO;
+	}
+	return 0;
+}
+
 int write_file(const char *file_path, const void *buf, const size_t buf_len)
 {
-	int fd;
+	int fd, ret;
 	FILE *fp;
-	size_t len_wrote;
 
 	fd = openat(criu_get_image_dir(), file_path, O_WRONLY | O_CREAT, 0600);
 	if (fd < 0) {
@@ -118,24 +141,15 @@ int write_file(const char *file_path, const void *buf, const size_t buf_len)
 		return -errno;
 	}
 
-	len_wrote = fwrite(buf, 1, buf_len, fp);
-	if (len_wrote != buf_len) {
-		pr_perror("Unable to write %s (wrote:%ld buf_len:%ld)", file_path, len_wrote, buf_len);
-		fclose(fp);
-		return -EIO;
-	}
-
-	pr_info("Wrote file:%s (%ld bytes)\n", file_path, buf_len);
-	/* this will also close fd */
-	fclose(fp);
-	return 0;
+	ret = write_fp(fp, buf, buf_len);
+	fclose(fp); /* this will also close fd */
+	return ret;
 }
 
 int read_file(const char *file_path, void *buf, const size_t buf_len)
 {
-	int fd;
+	int fd, ret;
 	FILE *fp;
-	size_t len_read;
 
 	fd = openat(criu_get_image_dir(), file_path, O_RDONLY);
 	if (fd < 0) {
@@ -149,18 +163,9 @@ int read_file(const char *file_path, void *buf, const size_t buf_len)
 		return -errno;
 	}
 
-	len_read = fread(buf, 1, buf_len, fp);
-	if (len_read != buf_len) {
-		pr_perror("Unable to read %s", file_path);
-		fclose(fp);
-		return -EIO;
-	}
-
-	pr_info("Read file:%s (%ld bytes)\n", file_path, buf_len);
-
-	/* this will also close fd */
-	fclose(fp);
-	return 0;
+	ret = read_fp(fp, buf, buf_len);
+	fclose(fp); /* this will also close fd */
+	return ret;
 }
 
 /* Call ioctl, restarting if it is interrupted */
@@ -183,12 +188,8 @@ int kmtIoctl(int fd, unsigned long request, void *arg)
 static void free_e(CriuKfd *e)
 {
 	for (int i = 0; i < e->n_bo_entries; i++) {
-		if (e->bo_entries[i]) {
-			if (e->bo_entries[i]->rawdata.data)
-				xfree(e->bo_entries[i]->rawdata.data);
-
+		if (e->bo_entries[i])
 			xfree(e->bo_entries[i]);
-		}
 	}
 
 	for (int i = 0; i < e->n_device_entries; i++) {
@@ -243,12 +244,6 @@ static int allocate_bo_entries(CriuKfd *e, int num_bos, struct kfd_criu_bo_bucke
 		}
 
 		bo_entry__init(entry);
-
-		if ((bo_bucket_ptr)[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM ||
-		    (bo_bucket_ptr)[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT) {
-			entry->rawdata.data = xmalloc((bo_bucket_ptr)[i].size);
-			entry->rawdata.len = (bo_bucket_ptr)[i].size;
-		}
 
 		e->bo_entries[i] = entry;
 		e->n_bo_entries++;
@@ -554,7 +549,7 @@ void free_and_unmap(uint64_t size, amdgpu_bo_handle h_bo, amdgpu_va_handle h_va,
 	amdgpu_bo_free(h_bo);
 }
 
-int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, BoEntry **bo_info_test, int i, amdgpu_device_handle h_dev,
+int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i, amdgpu_device_handle h_dev,
 		 enum sdma_op_type type)
 {
 	uint64_t size, gpu_addr_src, gpu_addr_dest, gpu_addr_ib;
@@ -599,7 +594,7 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, BoEntry **bo_info_test, 
 			return -ENOMEM;
 		}
 
-		memcpy(userptr, bo_info_test[i]->rawdata.data, size);
+		memcpy(userptr, bo_contents, size);
 		plugin_log_msg("data copied to userptr from protobuf buffer\n");
 
 		err = amdgpu_create_bo_from_user_mem(h_dev, userptr, size, &h_bo_src);
@@ -785,10 +780,8 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, BoEntry **bo_info_test, 
 
 	plugin_log_msg("done querying fence status\n");
 
-	if (type == SDMA_OP_VRAM_READ) {
-		memcpy(bo_info_test[i]->rawdata.data, userptr, size);
-		plugin_log_msg("data copied to protobuf buffer\n");
-	}
+	if (type == SDMA_OP_VRAM_READ)
+		memcpy(bo_contents, userptr, size);
 
 err_cs_submit_ib:
 	amdgpu_cs_ctx_free(h_ctx);
@@ -843,10 +836,14 @@ void *dump_bo_contents(void *_thread_data)
 	BoEntry **bo_info = thread_data->bo_entries;
 	amdgpu_device_handle h_dev;
 	uint32_t major, minor;
-	int mem_fd = -1;
 	int num_bos = 0;
 	int i, ret = 0;
 	char *fname;
+	FILE *mem_fp = NULL;
+	FILE *bo_contents_fp = NULL;
+	uint8_t *buffer = NULL;
+	char img_path[30];
+	size_t max_bo_size = 0;
 
 	pr_info("amdgpu_plugin: Thread[0x%x] started\n", thread_data->gpu_id);
 
@@ -857,14 +854,41 @@ void *dump_bo_contents(void *_thread_data)
 	}
 	plugin_log_msg("libdrm initialized successfully\n");
 
+	for (i = 0; i < thread_data->num_of_bos; i++) {
+		if (bo_buckets[i].gpu_id == thread_data->gpu_id &&
+		    (bo_buckets[i].alloc_flags &
+		    (KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_GTT)) &&
+			bo_buckets[i].size > max_bo_size) {
+
+			max_bo_size = bo_buckets[i].size;
+		}
+	}
+
+	/* Allocate buffer to fit biggest BO */
+	buffer = xmalloc(max_bo_size);
+	if (!buffer) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
+	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%04x.img", thread_data->gpu_id);
+	bo_contents_fp = fopen(img_path, "w");
+	if (!bo_contents_fp) {
+		pr_perror("Cannot fopen %s", img_path);
+		ret = -EIO;
+		goto exit;
+	}
+
 	if (asprintf(&fname, PROCPIDMEM, thread_data->pid) < 0) {
 		pr_perror("failed in asprintf, %s", fname);
 		ret = -1;
 		goto exit;
 	}
-	mem_fd = open(fname, O_RDONLY);
-	if (mem_fd < 0) {
-		pr_perror("Can't open %s for pid %d", fname, thread_data->pid);
+
+	mem_fp = fopen(fname, "r");
+	if (!mem_fp) {
+		pr_perror("Cannot fopen %s", fname);
+
 		free(fname);
 		ret = -errno;
 		goto exit;
@@ -883,8 +907,13 @@ void *dump_bo_contents(void *_thread_data)
 
 		if (bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) {
 			/* perform sDMA based vram copy */
-			if (!sdma_copy_bo(bo_buckets, bo_info, i, h_dev, SDMA_OP_VRAM_READ)) {
+			if (!sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_READ)) {
 				plugin_log_msg("** Successfully drained the BO using sDMA: bo_buckets[%d] **\n", i);
+
+				ret = write_fp(bo_contents_fp, buffer, bo_info[i]->size);
+				if (ret)
+					goto exit;
+
 				continue;
 			}
 
@@ -905,24 +934,24 @@ void *dump_bo_contents(void *_thread_data)
 			}
 
 			/* direct memcpy is possible on large bars */
-			memcpy(bo_info[i]->rawdata.data, addr, bo_buckets[i].size);
+			memcpy(buffer, addr, bo_buckets[i].size);
 			munmap(addr, bo_buckets[i].size);
 		} else {
-			size_t bo_size;
-			plugin_log_msg("Reading BO contents with /proc/pid/mem\n");
-			if (lseek(mem_fd, (off_t)bo_buckets[i].addr, SEEK_SET) == -1) {
-				pr_perror("Can't lseek for BO offset for pid = %d", thread_data->pid);
+			if (fseek (mem_fp, (off_t) bo_buckets[i].addr, SEEK_SET) == -1) {
+				pr_perror("Can't fseek for BO offset");
+
 				ret = -errno;
 				goto exit;
 			}
 
-			bo_size = read(mem_fd, bo_info[i]->rawdata.data, bo_info[i]->size);
-			if (bo_size != bo_info[i]->size) {
-				pr_perror("Can't read buffer");
-				ret = -errno;
+			ret = read_fp(mem_fp, buffer, bo_info[i]->size);
+			if (ret)
 				goto exit;
-			}
 		} /* PROCPIDMEM read done */
+
+		ret = write_fp(bo_contents_fp, buffer, bo_info[i]->size);
+		if (ret)
+			goto exit;
 	}
 
 exit:
@@ -930,8 +959,13 @@ exit:
 
 	amdgpu_device_deinitialize(h_dev);
 
-	if (mem_fd >= 0)
-		close(mem_fd);
+	if (bo_contents_fp)
+		fclose(bo_contents_fp);
+	if (mem_fp)
+		fclose(mem_fp);
+
+	xfree(buffer);
+
 	thread_data->ret = ret;
 	return NULL;
 };
@@ -943,7 +977,11 @@ void *restore_bo_contents(void *_thread_data)
 	BoEntry **bo_info = thread_data->bo_entries;
 	amdgpu_device_handle h_dev;
 	uint32_t major, minor;
-	int mem_fd = -1;
+	FILE* mem_fp = NULL;
+	FILE* bo_contents_fp = NULL;
+	uint8_t *buffer = NULL;
+	char img_path[30];
+	size_t max_bo_size = 0;
 	int num_bos = 0;
 	int i, ret = 0;
 	char *fname;
@@ -957,15 +995,40 @@ void *restore_bo_contents(void *_thread_data)
 	}
 	plugin_log_msg("libdrm initialized successfully\n");
 
+	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%04x.img", thread_data->gpu_id);
+	bo_contents_fp = fopen(img_path, "r");
+	if (!bo_contents_fp) {
+		pr_perror("Cannot fopen %s", img_path);
+		ret = -errno;
+		goto exit;
+	}
+
+	/* Allocate buffer to fit biggest BO */
+	for (i = 0; i < thread_data->num_of_bos; i++) {
+		if (bo_buckets[i].gpu_id == thread_data->gpu_id &&
+			(bo_buckets[i].alloc_flags &
+			(KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_GTT)) &&
+			bo_buckets[i].size > max_bo_size) {
+
+			max_bo_size = bo_buckets[i].size;
+		}
+	}
+
+	buffer = xmalloc(max_bo_size);
+	if (!buffer) {
+		ret = -ENOMEM;
+		goto exit;
+	}
+
 	if (asprintf(&fname, PROCPIDMEM, thread_data->pid) < 0) {
 		pr_perror("failed in asprintf, %s", fname);
 		ret = -1;
 		goto exit;
 	}
 
-	mem_fd = open(fname, O_RDWR);
-	if (mem_fd < 0) {
-		pr_perror("Can't open %s for pid %d", fname, thread_data->pid);
+	mem_fp = fopen(fname, "w");
+	if (!mem_fp) {
+		pr_perror("Cannot fopen %s", fname);
 		free(fname);
 		ret = -errno;
 		goto exit;
@@ -985,9 +1048,13 @@ void *restore_bo_contents(void *_thread_data)
 		    !(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
 			continue;
 
+		ret = read_fp(bo_contents_fp, buffer, bo_info[i]->size);
+		if (ret)
+			goto exit;
+
 		if (bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) {
 			/* perform sDMA based VRAM write */
-			if (!sdma_copy_bo(bo_buckets, bo_info, i, h_dev, SDMA_OP_VRAM_WRITE)) {
+			if (!sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_WRITE)) {
 				plugin_log_msg("** Successfully filled the BO using sDMA: "
 					       "bo_buckets[%d] **\n",
 					       i);
@@ -1009,10 +1076,9 @@ void *restore_bo_contents(void *_thread_data)
 			}
 
 			/* direct memcpy is possible on large bars */
-			memcpy(addr, (void *)bo_info[i]->rawdata.data, bo_info[i]->size);
+			memcpy(addr, buffer, bo_info[i]->size);
 			munmap(addr, bo_info[i]->size);
 		} else {
-			size_t bo_size;
 			/* Use indirect host data path via /proc/pid/mem on small pci bar GPUs or
 			 * for Buffer Objects that don't have HostAccess permissions.
 			 */
@@ -1026,19 +1092,18 @@ void *restore_bo_contents(void *_thread_data)
 				goto exit;
 			}
 
-			if (lseek(mem_fd, (off_t)addr, SEEK_SET) == -1) {
-				pr_perror("Can't lseek for BO offset for pid = %d", thread_data->pid);
+			if (fseek (mem_fp, (off_t) addr, SEEK_SET) == -1) {
+				pr_perror("Can't fseek for BO offset for pid = %d", thread_data->pid);
+
 				ret = -errno;
 				goto exit;
 			}
 
 			plugin_log_msg("Attempt writing now\n");
-			bo_size = write(mem_fd, bo_info[i]->rawdata.data, bo_info[i]->size);
-			if (bo_size != bo_info[i]->size) {
-				pr_perror("Can't write buffer");
-				ret = -errno;
+			ret = write_fp(mem_fp, buffer, bo_info[i]->size);
+			if (ret)
 				goto exit;
-			}
+
 			munmap(addr, bo_info[i]->size);
 		}
 	}
@@ -1046,8 +1111,11 @@ void *restore_bo_contents(void *_thread_data)
 exit:
 	pr_info("amdgpu_plugin: Thread[0x%x] done num_bos:%d ret:%d\n", thread_data->gpu_id, num_bos, ret);
 
-	if (mem_fd >= 0)
-		close(mem_fd);
+	if (bo_contents_fp)
+		fclose(bo_contents_fp);
+
+	if (mem_fp)
+		fclose(mem_fp);
 
 	amdgpu_device_deinitialize(h_dev);
 	thread_data->ret = ret;
