@@ -971,6 +971,10 @@ static int premap_priv_vmas(struct pstree_item *t, struct vm_area_list *vmas, vo
 		if (!vma_area_is_private(vma, kdat.task_size))
 			continue;
 
+		/* VMA offset may change so we cannot premap */
+		if (vma->e->status & VMA_EXT_PLUGIN)
+			continue;
+
 		if (vma->pvma == NULL && pr->pieok && !vma_force_premap(vma, &vmas->h)) {
 			/*
 			 * VMA in question is not shared with anyone. We'll
