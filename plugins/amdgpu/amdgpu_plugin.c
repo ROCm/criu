@@ -101,6 +101,7 @@ extern bool kfd_caches_count_check;
 extern bool kfd_num_gws_check;
 extern bool kfd_vram_size_check;
 extern bool kfd_numa_check;
+extern bool kfd_capability_check;
 
 /**************************************************************************************************/
 
@@ -461,6 +462,7 @@ int amdgpu_plugin_init(int stage)
 		kfd_caches_count_check = true;
 		kfd_num_gws_check = true;
 		kfd_vram_size_check = true;
+		kfd_capability_check = true;
 		kfd_numa_check = true;
 
 		getenv_bool("KFD_FW_VER_CHECK", &kfd_fw_version_check);
@@ -469,6 +471,7 @@ int amdgpu_plugin_init(int stage)
 		getenv_bool("KFD_NUM_GWS_CHECK", &kfd_num_gws_check);
 		getenv_bool("KFD_VRAM_SIZE_CHECK", &kfd_vram_size_check);
 		getenv_bool("KFD_NUMA_CHECK", &kfd_numa_check);
+		getenv_bool("KFD_CAPABILITY_CHECK", &kfd_capability_check);
 	}
 	return 0;
 }

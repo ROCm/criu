@@ -58,6 +58,9 @@ bool kfd_num_gws_check = true;
 bool kfd_vram_size_check = true;
 /* Preserve NUMA regions */
 bool kfd_numa_check = true;
+/* Skip capability check */
+bool kfd_capability_check = true;
+
 
 /*
  * During dump, we can use any fd value so fd_next is always -1.
@@ -1015,8 +1018,10 @@ static bool device_properties_match(struct tp_node *src, struct tp_node *dest)
 	    src->device_id == dest->device_id && src->num_sdma_engines == dest->num_sdma_engines &&
 	    src->num_sdma_xgmi_engines == dest->num_sdma_xgmi_engines &&
 	    src->num_sdma_queues_per_engine == dest->num_sdma_queues_per_engine &&
-	    src->num_cp_queues == dest->num_cp_queues && src->capability == dest->capability &&
-	    src->vram_public == dest->vram_public && (!kfd_vram_size_check || (src->vram_size <= dest->vram_size)) &&
+	    src->num_cp_queues == dest->num_cp_queues &&
+	    src->vram_public == dest->vram_public &&
+	    (!kfd_capability_check || (src->capability == dest->capability)) &&
+	    (!kfd_vram_size_check || (src->vram_size <= dest->vram_size)) &&
 	    (!kfd_num_gws_check || (src->num_gws <= dest->num_gws)) &&
 	    (!kfd_caches_count_check || (src->caches_count <= dest->caches_count)) &&
 	    (!kfd_fw_version_check || (src->fw_version <= dest->fw_version)) &&

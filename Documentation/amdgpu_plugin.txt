@@ -88,8 +88,15 @@ executing criu command.
     Default:Enabled
 
     E.g:
-    KFD_IGNORE_NUMA=1
+    KFD_NUMA_CHECK=1
 
+*KFD_CAPABILITY_CHECK*::
+    Enable or disable capability check. If enabled, the capability on
+    restored GPU needs to be equal to the capability on the checkpointed GPU.
+    Default:Enabled
+
+    E.g:
+    KFD_CAPABILITY_CHECK=1
 
 AUTHOR
 ------
