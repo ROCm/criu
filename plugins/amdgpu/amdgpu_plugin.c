@@ -46,6 +46,9 @@
 #define HSAKMT_SEM_PATH	  "/dev/shm/sem.hsakmt_semaphore"
 #define HSAKMT_SEM	  "hsakmt_semaphore"
 
+#define KFD_IOCTL_MAJOR_VERSION 1
+#define MIN_KFD_IOCTL_MINOR_VERSION 7
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
@@ -1383,6 +1386,45 @@ exit:
 	return ret;
 }
 
+bool kernel_supports_criu(int fd)
+{
+	struct kfd_ioctl_get_version_args args = { 0 };
+	bool close_fd = false, ret = true;
+
+	if (fd < 0) {
+		fd = open(AMDGPU_KFD_DEVICE, O_RDONLY);
+		if (fd < 0) {
+			pr_perror("failed to open kfd in plugin");
+			return false;
+		}
+		close_fd = true;
+	}
+
+	if (kmtIoctl(fd, AMDKFD_IOC_GET_VERSION, &args) == -1) {
+		pr_perror("amdgpu_plugin: Failed to call get version ioctl");
+		ret = false;
+		goto exit;
+	}
+
+	pr_debug("Kernel IOCTL version:%d.%02d\n", args.major_version, args.minor_version);
+
+	if (args.major_version != KFD_IOCTL_MAJOR_VERSION ||
+	    args.minor_version < MIN_KFD_IOCTL_MINOR_VERSION) {
+
+		pr_err("amdgpu_plugin: CR not supported on current kernel (min:%02d.%02d current:%02d.%02d)\n",
+						args.major_version, args.minor_version,
+						KFD_IOCTL_MAJOR_VERSION, MIN_KFD_IOCTL_MINOR_VERSION);
+		ret = false;
+		goto exit;
+	}
+
+exit:
+	if (close_fd)
+		close(fd);
+
+	return ret;
+}
+
 int amdgpu_plugin_dump_file(int fd, int id)
 {
 	struct kfd_ioctl_criu_args args = { 0 };
@@ -1456,6 +1498,14 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	}
 
 	pr_info("amdgpu_plugin: %s : %s() called for fd = %d\n", CR_PLUGIN_DESC.name, __func__, major(st.st_rdev));
+
+	/* KFD only allows ioctl calls from the same process that opened the KFD file descriptor.
+	 * The existing /dev/kfd file descriptor that is passed in is only allowed to do IOCTL calls with
+	 * CAP_CHECKPOINT_RESTORE/CAP_SYS_ADMIN. So kernel_supports_criu() needs to open its own file descriptor to
+	 * perform the AMDKFD_IOC_GET_VERSION ioctl.
+	 */
+	if (!kernel_supports_criu(-1))
+		return -ENOTSUP;
 
 	args.op = KFD_CRIU_OP_PROCESS_INFO;
 	if (kmtIoctl(fd, AMDKFD_IOC_CRIU_OP, &args) == -1) {
@@ -1842,6 +1892,9 @@ int amdgpu_plugin_restore_file(int id)
 		pr_perror("failed to open kfd in plugin");
 		return -1;
 	}
+
+	if (!kernel_supports_criu(fd))
+		return -ENOTSUP;
 
 	pr_info("KFD Image file size:%ld\n", img_size);
 	buf = xmalloc(img_size);
