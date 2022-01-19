@@ -226,11 +226,11 @@ int read_file(const char *file_path, void *buf, const size_t buf_len)
 /* Call ioctl, restarting if it is interrupted */
 int kmtIoctl(int fd, unsigned long request, void *arg)
 {
-	int ret;
+	int ret, max_retries = 200;
 
 	do {
 		ret = ioctl(fd, request, arg);
-	} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+	} while (ret == -1 && max_retries-- > 0 && (errno == EINTR || errno == EAGAIN));
 
 	if (ret == -1 && errno == EBADF)
 		/* In case pthread_atfork didn't catch it, this will
