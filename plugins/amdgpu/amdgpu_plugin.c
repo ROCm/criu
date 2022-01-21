@@ -504,6 +504,7 @@ struct thread_data {
 	BoEntry **bo_entries;
 	int drm_fd;
 	int ret;
+	int id;
 };
 
 int amdgpu_plugin_handle_device_vma(int fd, const struct stat *st_buf)
@@ -929,7 +930,7 @@ void *dump_bo_contents(void *_thread_data)
 		goto exit;
 	}
 
-	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%04x.img", thread_data->gpu_id);
+	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%d-%04x.img", thread_data->id, thread_data->gpu_id);
 	bo_contents_fp = open_img_file(img_path, true, &image_size);
 	if (!bo_contents_fp) {
 		pr_perror("Cannot fopen %s", img_path);
@@ -1052,7 +1053,8 @@ void *restore_bo_contents(void *_thread_data)
 	}
 	plugin_log_msg("libdrm initialized successfully\n");
 
-	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%04x.img", thread_data->gpu_id);
+	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%d-%04x.img", thread_data->id, thread_data->gpu_id);
+
 	bo_contents_fp = open_img_file(img_path, false, &image_size);
 	if (!bo_contents_fp) {
 		pr_perror("Cannot fopen %s", img_path);
@@ -1312,7 +1314,7 @@ exit:
 	return ret;
 }
 
-static int save_bos(int fd, struct kfd_ioctl_criu_args *args, struct kfd_criu_bo_bucket *bo_buckets,
+static int save_bos(int id, int fd, struct kfd_ioctl_criu_args *args, struct kfd_criu_bo_bucket *bo_buckets,
 		    CriuKfd *e)
 {
 	struct thread_data *thread_datas;
@@ -1352,6 +1354,7 @@ static int save_bos(int fd, struct kfd_ioctl_criu_args *args, struct kfd_criu_bo
 			goto exit;
 		}
 
+		thread_datas[i].id = id;
 		thread_datas[i].gpu_id = dev->gpu_id;
 		thread_datas[i].bo_buckets = bo_buckets;
 		thread_datas[i].bo_entries = e->bo_entries;
@@ -1556,7 +1559,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	if (ret)
 		goto exit;
 
-	ret = save_bos(fd, &args, (struct kfd_criu_bo_bucket *)args.bos, e);
+	ret = save_bos(id, fd, &args, (struct kfd_criu_bo_bucket *)args.bos, e);
 	if (ret)
 		goto exit;
 
@@ -1569,7 +1572,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	if (ret)
 		goto exit;
 
-	snprintf(img_path, sizeof(img_path), "kfd.%d.img", id);
+	snprintf(img_path, sizeof(img_path), "kfd-%d.img", id);
 	pr_info("amdgpu_plugin: img_path = %s\n", img_path);
 
 	len = criu_kfd__get_packed_size(e);
@@ -1691,7 +1694,7 @@ static int restore_bos(struct kfd_ioctl_criu_args *args, CriuKfd *e)
 	return 0;
 }
 
-static int restore_bo_data(struct kfd_criu_bo_bucket *bo_buckets, CriuKfd *e)
+static int restore_bo_data(int id, struct kfd_criu_bo_bucket *bo_buckets, CriuKfd *e)
 {
 	struct thread_data *thread_datas;
 	int thread_i, ret = 0;
@@ -1763,6 +1766,7 @@ static int restore_bo_data(struct kfd_criu_bo_bucket *bo_buckets, CriuKfd *e)
 			goto exit;
 		}
 
+		thread_datas[thread_i].id = id;
 		thread_datas[thread_i].gpu_id = e->device_entries[i]->gpu_id;
 		thread_datas[thread_i].bo_buckets = bo_buckets;
 		thread_datas[thread_i].bo_entries = e->bo_entries;
@@ -1812,7 +1816,7 @@ int amdgpu_plugin_restore_file(int id)
 
 	pr_info("amdgpu_plugin: Initialized kfd plugin restorer with ID = %d\n", id);
 
-	snprintf(img_path, sizeof(img_path), "kfd.%d.img", id);
+	snprintf(img_path, sizeof(img_path), "kfd-%d.img", id);
 
 	img_fp = open_img_file(img_path, false, &img_size);
 	if (!img_fp) {
@@ -1971,7 +1975,7 @@ int amdgpu_plugin_restore_file(int id)
 		goto exit;
 	}
 
-	ret = restore_bo_data((struct kfd_criu_bo_bucket *)args.bos, e);
+	ret = restore_bo_data(id, (struct kfd_criu_bo_bucket *)args.bos, e);
 	if (ret)
 		goto exit;
 
