@@ -898,7 +898,7 @@ void *dump_bo_contents(void *_thread_data)
 	uint8_t *buffer = NULL;
 	uint32_t major, minor;
 	FILE *mem_fp = NULL;
-	char img_path[30];
+	char img_path[40];
 	int num_bos = 0;
 	int i, ret = 0;
 	char *fname;
@@ -1039,7 +1039,7 @@ void *restore_bo_contents(void *_thread_data)
 	amdgpu_device_handle h_dev;
 	uint32_t major, minor;
 	uint8_t *buffer = NULL;
-	char img_path[30];
+	char img_path[40];
 	int num_bos = 0;
 	int i, ret = 0;
 	char *fname;
@@ -1414,7 +1414,7 @@ bool kernel_supports_criu(int fd)
 	if (args.major_version != KFD_IOCTL_MAJOR_VERSION ||
 	    args.minor_version < MIN_KFD_IOCTL_MINOR_VERSION) {
 
-		pr_err("amdgpu_plugin: CR not supported on current kernel (min:%02d.%02d current:%02d.%02d)\n",
+		pr_err("amdgpu_plugin: CR not supported on current kernel (current:%02d.%02d min:%02d.%02d)\n",
 						args.major_version, args.minor_version,
 						KFD_IOCTL_MAJOR_VERSION, MIN_KFD_IOCTL_MINOR_VERSION);
 		ret = false;
