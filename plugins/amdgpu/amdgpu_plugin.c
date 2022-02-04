@@ -46,6 +46,10 @@
 #define HSAKMT_SEM_PATH	  "/dev/shm/sem.hsakmt_semaphore"
 #define HSAKMT_SEM	  "hsakmt_semaphore"
 
+#define IMG_KFD_FILE "amdgpu-kfd-%d.img"
+#define IMG_RENDERD_FILE "amdgpu-renderD-%d.img"
+#define IMG_PAGES_FILE "amdgpu-pages-%d-%04x.img"
+
 #define KFD_IOCTL_MAJOR_VERSION 1
 #define MIN_KFD_IOCTL_MINOR_VERSION 7
 
@@ -930,7 +934,7 @@ void *dump_bo_contents(void *_thread_data)
 		goto exit;
 	}
 
-	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%d-%04x.img", thread_data->id, thread_data->gpu_id);
+	snprintf(img_path, sizeof(img_path), IMG_PAGES_FILE, thread_data->id, thread_data->gpu_id);
 	bo_contents_fp = open_img_file(img_path, true, &image_size);
 	if (!bo_contents_fp) {
 		pr_perror("Cannot fopen %s", img_path);
@@ -1053,7 +1057,7 @@ void *restore_bo_contents(void *_thread_data)
 	}
 	plugin_log_msg("libdrm initialized successfully\n");
 
-	snprintf(img_path, sizeof(img_path), "amdgpu-bo-contents-%d-%04x.img", thread_data->id, thread_data->gpu_id);
+	snprintf(img_path, sizeof(img_path), IMG_PAGES_FILE, thread_data->id, thread_data->gpu_id);
 
 	bo_contents_fp = open_img_file(img_path, false, &image_size);
 	if (!bo_contents_fp) {
@@ -1488,7 +1492,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 
 		criu_render_node__pack(&rd, buf);
 
-		snprintf(img_path, sizeof(img_path), "renderDXXX.%d.img", id);
+		snprintf(img_path, sizeof(img_path), IMG_RENDERD_FILE, id);
 		ret = write_img_file(img_path, buf, len);
 		if (ret) {
 			xfree(buf);
@@ -1572,7 +1576,7 @@ int amdgpu_plugin_dump_file(int fd, int id)
 	if (ret)
 		goto exit;
 
-	snprintf(img_path, sizeof(img_path), "kfd-%d.img", id);
+	snprintf(img_path, sizeof(img_path), IMG_KFD_FILE, id);
 	pr_info("amdgpu_plugin: img_path = %s\n", img_path);
 
 	len = criu_kfd__get_packed_size(e);
@@ -1816,7 +1820,7 @@ int amdgpu_plugin_restore_file(int id)
 
 	pr_info("amdgpu_plugin: Initialized kfd plugin restorer with ID = %d\n", id);
 
-	snprintf(img_path, sizeof(img_path), "kfd-%d.img", id);
+	snprintf(img_path, sizeof(img_path), IMG_KFD_FILE, id);
 
 	img_fp = open_img_file(img_path, false, &img_size);
 	if (!img_fp) {
@@ -1828,7 +1832,7 @@ int amdgpu_plugin_restore_file(int id)
 		 * TODO: Currently, this code will only work if this function is called for /dev/kfd
 		 * first as we assume restore_maps is already filled. Need to fix this later.
 		 */
-		snprintf(img_path, sizeof(img_path), "renderDXXX.%d.img", id);
+		snprintf(img_path, sizeof(img_path), IMG_RENDERD_FILE, id);
 		pr_info("Restoring RenderD %s\n", img_path);
 
 		img_fp = open_img_file(img_path, false, &img_size);
