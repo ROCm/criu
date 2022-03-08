@@ -672,8 +672,6 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i
 		}
 
 		h_bo_src = res.buf_handle;
-		plugin_log_msg("closing src fd %d\n", shared_fd);
-		close(shared_fd);
 		break;
 
 	default:
@@ -702,8 +700,6 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i
 		}
 
 		h_bo_dest = res.buf_handle;
-		plugin_log_msg("closing dest fd %d\n", shared_fd);
-		close(shared_fd);
 		break;
 
 	case SDMA_OP_VRAM_READ:
@@ -897,11 +893,9 @@ void *dump_bo_contents(void *_thread_data)
 	amdgpu_device_handle h_dev;
 	uint8_t *buffer = NULL;
 	uint32_t major, minor;
-	FILE *mem_fp = NULL;
 	char img_path[40];
 	int num_bos = 0;
 	int i, ret = 0;
-	char *fname;
 
 	pr_info("amdgpu_plugin: Thread[0x%x] started\n", thread_data->gpu_id);
 
@@ -936,92 +930,37 @@ void *dump_bo_contents(void *_thread_data)
 		goto exit;
 	}
 
-	if (asprintf(&fname, PROCPIDMEM, thread_data->pid) < 0) {
-		pr_perror("failed in asprintf, %s", fname);
-		ret = -1;
-		goto exit;
-	}
-
-	mem_fp = fopen(fname, "r");
-	if (!mem_fp) {
-		pr_perror("Cannot fopen %s", fname);
-
-		free(fname);
-		ret = -errno;
-		goto exit;
-	}
-	plugin_log_msg("Opened %s file for pid = %d\n", fname, thread_data->pid);
-	free(fname);
-
 	for (i = 0; i < thread_data->num_of_bos; i++) {
 		if (bo_buckets[i].gpu_id != thread_data->gpu_id)
 			continue;
 
-		num_bos++;
-		if (!(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) &&
-		    !(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
+		if (!(bo_buckets[i].alloc_flags & (KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_GTT)))
 			continue;
 
-		if (bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) {
-			/* perform sDMA based vram copy */
-			if (!sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_READ)) {
-				plugin_log_msg("** Successfully drained the BO using sDMA: bo_buckets[%d] **\n", i);
+		num_bos++;
 
-				ret = write_fp(bo_contents_fp, buffer, bo_info[i]->size);
-				if (ret)
-					goto exit;
-
-				continue;
-			}
-
-			pr_info("Failed to read the BO using sDMA, retry with HDP: bo_buckets[%d]\n", i);
+		ret = sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_READ);
+		if (ret) {
+			pr_err("Failed to drain the BO using sDMA: bo_buckets[%d]\n", i);
+			break;
 		}
 
-		if (bo_info[i]->alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC) {
-			void *addr;
-
-			plugin_log_msg("amdgpu_plugin: large bar read possible\n");
-
-			addr = mmap(NULL, bo_buckets[i].size, PROT_READ, MAP_SHARED, thread_data->drm_fd,
-				    bo_buckets[i].offset);
-			if (addr == MAP_FAILED) {
-				pr_perror("amdgpu_plugin: mmap failed");
-				ret = -errno;
-				goto exit;
-			}
-
-			/* direct memcpy is possible on large bars */
-			memcpy(buffer, addr, bo_buckets[i].size);
-			munmap(addr, bo_buckets[i].size);
-		} else {
-			if (fseek(mem_fp, (off_t)bo_buckets[i].addr, SEEK_SET) == -1) {
-				pr_perror("Can't fseek for BO offset");
-
-				ret = -errno;
-				goto exit;
-			}
-
-			ret = read_fp(mem_fp, buffer, bo_info[i]->size);
-			if (ret)
-				goto exit;
-		} /* PROCPIDMEM read done */
+		plugin_log_msg("** Successfully drained the BO using sDMA: bo_buckets[%d] **\n", i);
 
 		ret = write_fp(bo_contents_fp, buffer, bo_info[i]->size);
 		if (ret)
-			goto exit;
+			break;
 	}
 
 exit:
 	pr_info("amdgpu_plugin: Thread[0x%x] done num_bos:%d ret:%d\n", thread_data->gpu_id, num_bos, ret);
 
-	amdgpu_device_deinitialize(h_dev);
-
 	if (bo_contents_fp)
 		fclose(bo_contents_fp);
-	if (mem_fp)
-		fclose(mem_fp);
 
 	xfree(buffer);
+
+	amdgpu_device_deinitialize(h_dev);
 
 	thread_data->ret = ret;
 	return NULL;
@@ -1033,14 +972,13 @@ void *restore_bo_contents(void *_thread_data)
 	struct kfd_criu_bo_bucket *bo_buckets = thread_data->bo_buckets;
 	size_t image_size = 0, total_bo_size = 0, max_bo_size = 0;
 	BoEntry **bo_info = thread_data->bo_entries;
-	FILE *mem_fp = NULL, *bo_contents_fp = NULL;
+	FILE *bo_contents_fp = NULL;
 	amdgpu_device_handle h_dev;
 	uint32_t major, minor;
 	uint8_t *buffer = NULL;
 	char img_path[40];
 	int num_bos = 0;
 	int i, ret = 0;
-	char *fname;
 
 	pr_info("amdgpu_plugin: Thread[0x%x] started\n", thread_data->gpu_id);
 
@@ -1084,102 +1022,35 @@ void *restore_bo_contents(void *_thread_data)
 		goto exit;
 	}
 
-	if (asprintf(&fname, PROCPIDMEM, thread_data->pid) < 0) {
-		pr_perror("failed in asprintf, %s", fname);
-		ret = -1;
-		goto exit;
-	}
-
-	mem_fp = fopen(fname, "w");
-	if (!mem_fp) {
-		pr_perror("Cannot fopen %s", fname);
-		free(fname);
-		ret = -errno;
-		goto exit;
-	}
-	plugin_log_msg("Opened %s file for pid = %d\n", fname, thread_data->pid);
-	free(fname);
-
 	for (i = 0; i < thread_data->num_of_bos; i++) {
-		void *addr;
-
 		if (bo_buckets[i].gpu_id != thread_data->gpu_id)
+			continue;
+
+		if (!(bo_buckets[i].alloc_flags & (KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_GTT)))
 			continue;
 
 		num_bos++;
 
-		if (!(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) &&
-		    !(bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT))
-			continue;
-
 		ret = read_fp(bo_contents_fp, buffer, bo_info[i]->size);
 		if (ret)
-			goto exit;
+			break;
 
-		if (bo_buckets[i].alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM) {
-			/* perform sDMA based VRAM write */
-			if (!sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_WRITE)) {
-				plugin_log_msg("** Successfully filled the BO using sDMA: "
-					       "bo_buckets[%d] **\n",
-					       i);
-				continue;
-			}
-
-			pr_info("Failed to fill the BO using sDMA, retry with HDP: bo_buckets[%d]\n", i);
+		ret = sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_WRITE);
+		if (ret) {
+			pr_err("Failed to fill the BO using sDMA: bo_buckets[%d]\n", i);
+			break;
 		}
 
-		if (bo_info[i]->alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC) {
-			plugin_log_msg("amdgpu_plugin: large bar write possible\n");
-
-			addr = mmap(NULL, bo_buckets[i].size, PROT_WRITE, MAP_SHARED, thread_data->drm_fd,
-				    bo_buckets[i].restored_offset);
-			if (addr == MAP_FAILED) {
-				pr_perror("amdgpu_plugin: mmap failed");
-				ret = -errno;
-				goto exit;
-			}
-
-			/* direct memcpy is possible on large bars */
-			memcpy(addr, buffer, bo_info[i]->size);
-			munmap(addr, bo_info[i]->size);
-		} else {
-			/* Use indirect host data path via /proc/pid/mem on small pci bar GPUs or
-			 * for Buffer Objects that don't have HostAccess permissions.
-			 */
-			plugin_log_msg("amdgpu_plugin: using PROCPIDMEM to restore BO contents\n");
-			addr = mmap(NULL, bo_info[i]->size, PROT_NONE, MAP_SHARED, thread_data->drm_fd,
-				    bo_buckets[i].restored_offset);
-
-			if (addr == MAP_FAILED) {
-				pr_perror("amdgpu_plugin: mmap failed");
-				ret = -errno;
-				goto exit;
-			}
-
-			if (fseek(mem_fp, (off_t)addr, SEEK_SET) == -1) {
-				pr_perror("Can't fseek for BO offset for pid = %d", thread_data->pid);
-
-				ret = -errno;
-				goto exit;
-			}
-
-			plugin_log_msg("Attempt writing now\n");
-			ret = write_fp(mem_fp, buffer, bo_info[i]->size);
-			if (ret)
-				goto exit;
-
-			munmap(addr, bo_info[i]->size);
-		}
+		plugin_log_msg("** Successfully filled the BO using sDMA: bo_buckets[%d] **\n", i);
 	}
 
 exit:
 	pr_info("amdgpu_plugin: Thread[0x%x] done num_bos:%d ret:%d\n", thread_data->gpu_id, num_bos, ret);
 
+	xfree(buffer);
+
 	if (bo_contents_fp)
 		fclose(bo_contents_fp);
-
-	if (mem_fp)
-		fclose(mem_fp);
 
 	amdgpu_device_deinitialize(h_dev);
 	thread_data->ret = ret;
@@ -1376,6 +1247,9 @@ static int save_bos(int id, int fd, struct kfd_ioctl_criu_args *args, struct kfd
 			goto exit;
 		}
 	}
+
+	for (i = 0; i < e->num_of_bos; i++)
+		close(bo_buckets[i].dmabuf_fd);
 exit:
 	xfree(thread_datas);
 	pr_info("Dumped bos %s (ret:%d)\n", ret ? "failed" : "ok", ret);
@@ -1791,6 +1665,8 @@ static int restore_bo_data(int id, struct kfd_criu_bo_bucket *bo_buckets, CriuKf
 			goto exit;
 		}
 	}
+	for (int i = 0; i < e->num_of_bos; i++)
+		close(bo_buckets[i].dmabuf_fd);
 exit:
 	xfree(thread_datas);
 	return ret;
