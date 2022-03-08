@@ -607,7 +607,7 @@ void free_and_unmap(uint64_t size, amdgpu_bo_handle h_bo, amdgpu_va_handle h_va,
 	amdgpu_bo_free(h_bo);
 }
 
-int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i, amdgpu_device_handle h_dev,
+int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *userptr, int i, amdgpu_device_handle h_dev,
 		 enum sdma_op_type type)
 {
 	uint64_t size, gpu_addr_src, gpu_addr_dest, gpu_addr_ib;
@@ -625,7 +625,6 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i
 	struct amdgpu_cs_fence fence;
 	uint32_t family_id, expired;
 	amdgpu_context_handle h_ctx;
-	void *userptr = NULL;
 	uint32_t *ib = NULL;
 	int err, shared_fd;
 
@@ -645,20 +644,9 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i
 	/* prepare src buffer */
 	switch (type) {
 	case SDMA_OP_VRAM_WRITE:
-		/* create the userptr BO and prepare the src buffer */
-		posix_memalign(&userptr, sysconf(_SC_PAGE_SIZE), size);
-		if (!userptr) {
-			pr_perror("failed to alloc memory for userptr");
-			return -ENOMEM;
-		}
-
-		memcpy(userptr, bo_contents, size);
-		plugin_log_msg("data copied to userptr from protobuf buffer\n");
-
 		err = amdgpu_create_bo_from_user_mem(h_dev, userptr, size, &h_bo_src);
 		if (err) {
 			pr_perror("failed to create userptr for sdma");
-			free(userptr);
 			return -EFAULT;
 		}
 
@@ -703,16 +691,9 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i
 		break;
 
 	case SDMA_OP_VRAM_READ:
-		posix_memalign(&userptr, sysconf(_SC_PAGE_SIZE), size);
-		if (!userptr) {
-			pr_perror("failed to alloc memory for userptr");
-			goto err_dest_bo_prep;
-		}
-		memset(userptr, 0, size);
 		err = amdgpu_create_bo_from_user_mem(h_dev, userptr, size, &h_bo_dest);
 		if (err) {
 			pr_perror("failed to create userptr for sdma");
-			free(userptr);
 			goto err_dest_bo_prep;
 		}
 		break;
@@ -834,9 +815,6 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *bo_contents, int i
 
 	plugin_log_msg("done querying fence status\n");
 
-	if (type == SDMA_OP_VRAM_READ)
-		memcpy(bo_contents, userptr, size);
-
 err_cs_submit_ib:
 	amdgpu_cs_ctx_free(h_ctx);
 err_ctx:
@@ -856,11 +834,6 @@ err_dest_va:
 	if (err)
 		pr_perror("dest bo free failed");
 
-	if (userptr && (type == SDMA_OP_VRAM_READ)) {
-		free(userptr);
-		userptr = NULL;
-	}
-
 err_dest_bo_prep:
 	err = amdgpu_bo_va_op(h_bo_src, 0, size, gpu_addr_src, 0, AMDGPU_VA_OP_UNMAP);
 	if (err)
@@ -874,11 +847,6 @@ err_src_va:
 	if (err)
 		pr_perror("src bo free failed");
 
-	if (userptr && (type == SDMA_OP_VRAM_WRITE)) {
-		free(userptr);
-		userptr = NULL;
-	}
-
 	plugin_log_msg("Leaving sdma_copy_bo, err = %d\n", err);
 	return err;
 }
@@ -891,7 +859,7 @@ void *dump_bo_contents(void *_thread_data)
 	size_t max_bo_size = 0, image_size = 0;
 	FILE *bo_contents_fp = NULL;
 	amdgpu_device_handle h_dev;
-	uint8_t *buffer = NULL;
+	void *buffer;
 	uint32_t major, minor;
 	char img_path[40];
 	int num_bos = 0;
@@ -916,8 +884,9 @@ void *dump_bo_contents(void *_thread_data)
 	}
 
 	/* Allocate buffer to fit biggest BO */
-	buffer = xmalloc(max_bo_size);
+	posix_memalign(&buffer, sysconf(_SC_PAGE_SIZE), max_bo_size);
 	if (!buffer) {
+		pr_perror("Failed to alloc aligned memory");
 		ret = -ENOMEM;
 		goto exit;
 	}
@@ -975,7 +944,7 @@ void *restore_bo_contents(void *_thread_data)
 	FILE *bo_contents_fp = NULL;
 	amdgpu_device_handle h_dev;
 	uint32_t major, minor;
-	uint8_t *buffer = NULL;
+	void *buffer;
 	char img_path[40];
 	int num_bos = 0;
 	int i, ret = 0;
@@ -1016,8 +985,10 @@ void *restore_bo_contents(void *_thread_data)
 		goto exit;
 	}
 
-	buffer = xmalloc(max_bo_size);
+	/* Allocate buffer to fit biggest BO */
+	posix_memalign(&buffer, sysconf(_SC_PAGE_SIZE), max_bo_size);
 	if (!buffer) {
+		pr_perror("Failed to alloc aligned memory");
 		ret = -ENOMEM;
 		goto exit;
 	}
