@@ -44,7 +44,7 @@
 #define HSAKMT_SEM	  "hsakmt_semaphore"
 
 #define KFD_IOCTL_MAJOR_VERSION	    1
-#define MIN_KFD_IOCTL_MINOR_VERSION 7
+#define MIN_KFD_IOCTL_MINOR_VERSION 8
 
 #define IMG_KFD_FILE	 "amdgpu-kfd-%d.img"
 #define IMG_RENDERD_FILE "amdgpu-renderD-%d.img"
@@ -608,7 +608,7 @@ void free_and_unmap(uint64_t size, amdgpu_bo_handle h_bo, amdgpu_va_handle h_va,
 }
 
 int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *userptr, int i, amdgpu_device_handle h_dev,
-		 enum sdma_op_type type)
+		 uint64_t max_copy_size, enum sdma_op_type type)
 {
 	uint64_t size, gpu_addr_src, gpu_addr_dest, gpu_addr_ib;
 	uint64_t gpu_addr_src_orig, gpu_addr_dest_orig;
@@ -616,25 +616,16 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *userptr, int i, am
 	amdgpu_bo_handle h_bo_src, h_bo_dest, h_bo_ib;
 	struct amdgpu_bo_import_result res = { 0 };
 	uint64_t copy_size, bytes_remain, j = 0;
-	struct amdgpu_gpu_info gpu_info = { 0 };
-	uint64_t n_packets, max_copy_size;
+	uint64_t n_packets;
 	struct amdgpu_cs_ib_info ib_info;
 	amdgpu_bo_list_handle h_bo_list;
 	struct amdgpu_cs_request cs_req;
 	amdgpu_bo_handle resources[3];
 	struct amdgpu_cs_fence fence;
-	uint32_t family_id, expired;
+	uint32_t expired;
 	amdgpu_context_handle h_ctx;
 	uint32_t *ib = NULL;
 	int err, shared_fd;
-
-	err = amdgpu_query_gpu_info(h_dev, &gpu_info);
-	if (err) {
-		pr_perror("failed to query gpuinfo via libdrm");
-		return -EINVAL;
-	}
-
-	family_id = gpu_info.family_id;
 
 	shared_fd = bo_buckets[i].dmabuf_fd;
 	size = bo_buckets[i].size;
@@ -715,7 +706,7 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *userptr, int i, am
 	}
 	plugin_log_msg("Dest BO: GPU VA: %lx, size: %lx\n", gpu_addr_dest, size);
 
-	n_packets = (size + SDMA_LINEAR_COPY_MAX_SIZE) / SDMA_LINEAR_COPY_MAX_SIZE;
+	n_packets = (size + max_copy_size) / max_copy_size;
 	/* prepare ring buffer/indirect buffer for command submission
 	 * each copy packet is 7 dwords so we need to alloc 28x size for ib
 	 */
@@ -745,7 +736,6 @@ int sdma_copy_bo(struct kfd_criu_bo_bucket *bo_buckets, void *userptr, int i, am
 	bytes_remain = size;
 	gpu_addr_src_orig = gpu_addr_src;
 	gpu_addr_dest_orig = gpu_addr_dest;
-	max_copy_size = (family_id >= AMDGPU_FAMILY_AI) ? SDMA_LINEAR_COPY_MAX_SIZE : SDMA_LINEAR_COPY_MAX_SIZE - 1;
 	while (bytes_remain > 0) {
 		copy_size = min(bytes_remain, max_copy_size);
 
@@ -856,10 +846,12 @@ void *dump_bo_contents(void *_thread_data)
 	struct thread_data *thread_data = (struct thread_data *)_thread_data;
 	struct kfd_criu_bo_bucket *bo_buckets = thread_data->bo_buckets;
 	BoEntry **bo_info = thread_data->bo_entries;
+	struct amdgpu_gpu_info gpu_info = { 0 };
 	size_t max_bo_size = 0, image_size = 0;
 	FILE *bo_contents_fp = NULL;
 	amdgpu_device_handle h_dev;
 	void *buffer;
+	uint64_t max_copy_size;
 	uint32_t major, minor;
 	char img_path[40];
 	int num_bos = 0;
@@ -873,6 +865,15 @@ void *dump_bo_contents(void *_thread_data)
 		goto exit;
 	}
 	plugin_log_msg("libdrm initialized successfully\n");
+
+	ret = amdgpu_query_gpu_info(h_dev, &gpu_info);
+	if (ret) {
+		pr_perror("failed to query gpuinfo via libdrm");
+		goto exit;
+	}
+
+	max_copy_size = (gpu_info.family_id >= AMDGPU_FAMILY_AI) ? SDMA_LINEAR_COPY_MAX_SIZE :
+									 SDMA_LINEAR_COPY_MAX_SIZE - 1;
 
 	for (i = 0; i < thread_data->num_of_bos; i++) {
 		if (bo_buckets[i].gpu_id == thread_data->gpu_id &&
@@ -908,7 +909,7 @@ void *dump_bo_contents(void *_thread_data)
 
 		num_bos++;
 
-		ret = sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_READ);
+		ret = sdma_copy_bo(bo_buckets, buffer, i, h_dev, max_copy_size, SDMA_OP_VRAM_READ);
 		if (ret) {
 			pr_err("Failed to drain the BO using sDMA: bo_buckets[%d]\n", i);
 			break;
@@ -941,8 +942,10 @@ void *restore_bo_contents(void *_thread_data)
 	struct kfd_criu_bo_bucket *bo_buckets = thread_data->bo_buckets;
 	size_t image_size = 0, total_bo_size = 0, max_bo_size = 0;
 	BoEntry **bo_info = thread_data->bo_entries;
+	struct amdgpu_gpu_info gpu_info = { 0 };
 	FILE *bo_contents_fp = NULL;
 	amdgpu_device_handle h_dev;
+	uint64_t max_copy_size;
 	uint32_t major, minor;
 	void *buffer;
 	char img_path[40];
@@ -957,6 +960,15 @@ void *restore_bo_contents(void *_thread_data)
 		goto exit;
 	}
 	plugin_log_msg("libdrm initialized successfully\n");
+
+	ret = amdgpu_query_gpu_info(h_dev, &gpu_info);
+	if (ret) {
+		pr_perror("failed to query gpuinfo via libdrm");
+		goto exit;
+	}
+
+	max_copy_size = (gpu_info.family_id >= AMDGPU_FAMILY_AI) ? SDMA_LINEAR_COPY_MAX_SIZE :
+									 SDMA_LINEAR_COPY_MAX_SIZE - 1;
 
 	snprintf(img_path, sizeof(img_path), IMG_PAGES_FILE, thread_data->id, thread_data->gpu_id);
 	bo_contents_fp = open_img_file(img_path, false, &image_size);
@@ -1006,7 +1018,7 @@ void *restore_bo_contents(void *_thread_data)
 		if (ret)
 			break;
 
-		ret = sdma_copy_bo(bo_buckets, buffer, i, h_dev, SDMA_OP_VRAM_WRITE);
+		ret = sdma_copy_bo(bo_buckets, buffer, i, h_dev, max_copy_size, SDMA_OP_VRAM_WRITE);
 		if (ret) {
 			pr_err("Failed to fill the BO using sDMA: bo_buckets[%d]\n", i);
 			break;
