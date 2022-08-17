@@ -46,8 +46,6 @@
 #endif
 #define LOG_PREFIX "amdgpu_plugin: "
 
-//#define DEBUG 1 //DYSDEBUG
-
 #ifdef DEBUG
 #define plugin_log_msg(fmt, ...) pr_debug(fmt, ##__VA_ARGS__)
 #else
