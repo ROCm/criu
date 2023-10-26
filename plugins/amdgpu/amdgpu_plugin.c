@@ -165,6 +165,7 @@ FILE *open_img_file(char *path, bool write, size_t *size)
 	fp = fdopen(fd, write ? "w" : "r");
 	if (!fp) {
 		pr_perror("%s: Failed get pointer for %s", path, write ? "write" : "read");
+		close(fd);
 		return NULL;
 	}
 
@@ -914,7 +915,7 @@ void *dump_bo_contents(void *_thread_data)
 	int num_bos = 0;
 	int i, ret = 0;
 	FILE *bo_contents_fp = NULL;
-	void *buffer;
+	void *buffer = NULL;
 	char img_path[40];
 
 	pr_info("Thread[0x%x] started\n", thread_data->gpu_id);
@@ -1003,7 +1004,7 @@ void *restore_bo_contents(void *_thread_data)
 	uint64_t max_copy_size;
 	uint32_t major, minor;
 	FILE *bo_contents_fp = NULL;
-	void *buffer;
+	void *buffer = NULL;
 	char img_path[40];
 	int num_bos = 0;
 	int i, ret = 0;
@@ -1795,7 +1796,12 @@ int amdgpu_plugin_restore_file(int id)
 		 * copy of the fd. CRIU core owns the duplicated returned fd, and amdgpu_plugin owns the fd stored in
 		 * tp_node.
 		 */
-		return dup(fd);
+		fd = dup(fd);
+		if (fd == -1) {
+			pr_perror("unable to duplicate the render fd");
+			return -1;
+		}
+		return fd;
 	}
 
 	fd = open(AMDGPU_KFD_DEVICE, O_RDWR | O_CLOEXEC);
@@ -1955,10 +1961,15 @@ int amdgpu_plugin_update_vmamap(const char *in_path, const uint64_t addr, const 
 		if (addr == vma_md->vma_entry && old_offset == vma_md->old_pgoff) {
 			*new_offset = vma_md->new_pgoff;
 
-			if (is_renderD)
-				*updated_fd = vma_md->fd;
-			else
-				*updated_fd = -1;
+			*updated_fd = -1;
+			if (is_renderD) {
+				int fd = dup(vma_md->fd);
+				if (fd == -1) {
+					pr_perror("unable to duplicate the render fd");
+					return -1;
+				}
+				*updated_fd = fd;
+			}
 
 			plugin_log_msg("old_pgoff=0x%lx new_pgoff=0x%lx fd=%d\n", vma_md->old_pgoff, vma_md->new_pgoff,
 				       *updated_fd);

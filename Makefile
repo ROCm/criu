@@ -35,18 +35,18 @@ ifeq ($(ARCH),arm)
         ARMV		:= $(shell echo $(SUBARCH) | sed -nr 's/armv([[:digit:]]).*/\1/p; t; i7')
 
         ifeq ($(ARMV),6)
-                USERCFLAGS += -march=armv6
+                ARCHCFLAGS += -march=armv6
         endif
 
         ifeq ($(ARMV),7)
-                USERCFLAGS += -march=armv7-a+fp
+                ARCHCFLAGS += -march=armv7-a+fp
         endif
 
         ifeq ($(ARMV),8)
                 # Running 'setarch linux32 uname -m' returns armv8l on travis aarch64.
                 # This tells CRIU to handle armv8l just as armv7hf. Right now this is
                 # only used for compile testing. No further verification of armv8l exists.
-                USERCFLAGS += -march=armv7-a
+                ARCHCFLAGS += -march=armv7-a
                 ARMV := 7
         endif
 
@@ -159,12 +159,12 @@ export GMON GMONLDOPT
 endif
 
 AFLAGS			+= -D__ASSEMBLY__
-CFLAGS			+= $(USERCFLAGS) $(WARNINGS) $(DEFINES) -iquote include/
+CFLAGS			+= $(USERCFLAGS) $(ARCHCFLAGS) $(WARNINGS) $(DEFINES) -iquote include/
 HOSTCFLAGS		+= $(WARNINGS) $(DEFINES) -iquote include/
 export AFLAGS CFLAGS USERCLFAGS HOSTCFLAGS
 
 # Default target
-all: flog criu lib
+all: flog criu lib crit
 .PHONY: all
 
 #
@@ -298,9 +298,9 @@ clean mrproper:
 	$(Q) $(MAKE) $(build)=criu $@
 	$(Q) $(MAKE) $(build)=soccr $@
 	$(Q) $(MAKE) $(build)=lib $@
+	$(Q) $(MAKE) $(build)=crit $@
 	$(Q) $(MAKE) $(build)=compel $@
 	$(Q) $(MAKE) $(build)=compel/plugins $@
-	$(Q) $(MAKE) $(build)=lib $@
 .PHONY: clean mrproper
 
 clean-amdgpu_plugin:
@@ -346,6 +346,10 @@ test: zdtm
 amdgpu_plugin: criu
 	$(Q) $(MAKE) -C plugins/amdgpu all
 .PHONY: amdgpu_plugin
+
+crit: lib
+	$(Q) $(MAKE) -C crit
+.PHONY: crit
 
 #
 # Generating tar requires tag matched CRIU_VERSION.
@@ -412,6 +416,7 @@ help:
 	@echo '    Targets:'
 	@echo '      all             - Build all [*] targets'
 	@echo '    * criu            - Build criu'
+	@echo '    * crit            - Build crit'
 	@echo '      zdtm            - Build zdtm test-suite'
 	@echo '      docs            - Build documentation'
 	@echo '      install         - Install CRIU (see INSTALL.md)'
@@ -435,11 +440,12 @@ lint:
 	flake8 --config=scripts/flake8.cfg test/zdtm.py
 	flake8 --config=scripts/flake8.cfg test/inhfd/*.py
 	flake8 --config=scripts/flake8.cfg test/others/rpc/config_file.py
-	flake8 --config=scripts/flake8.cfg lib/py/images/pb2dict.py
-	flake8 --config=scripts/flake8.cfg lib/py/images/images.py
+	flake8 --config=scripts/flake8.cfg lib/pycriu/images/pb2dict.py
+	flake8 --config=scripts/flake8.cfg lib/pycriu/images/images.py
 	flake8 --config=scripts/flake8.cfg scripts/criu-ns
 	flake8 --config=scripts/flake8.cfg test/others/criu-ns/run.py
-	flake8 --config=scripts/flake8.cfg crit/setup.py
+	flake8 --config=scripts/flake8.cfg crit/*.py
+	flake8 --config=scripts/flake8.cfg crit/crit/*.py
 	flake8 --config=scripts/flake8.cfg scripts/uninstall_module.py
 	flake8 --config=scripts/flake8.cfg coredump/ coredump/coredump
 	flake8 --config=scripts/flake8.cfg scripts/github-indent-warnings.py

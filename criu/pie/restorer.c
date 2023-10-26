@@ -104,7 +104,7 @@ bool fault_injected(enum faults f)
  * Hint: compel on aarch64 shall learn relocs for that.
  */
 static unsigned __page_size;
-unsigned page_size(void)
+unsigned long page_size(void)
 {
 	return __page_size;
 }
@@ -735,7 +735,7 @@ static int recv_cg_set_restore_ack(int sk)
  * Threads restoration via sigreturn. Note it's locked
  * routine and calls for unlock at the end.
  */
-long __export_restore_thread(struct thread_restore_args *args)
+__visible long __export_restore_thread(struct thread_restore_args *args)
 {
 	struct rt_sigframe *rt_sigframe;
 	k_rtsigset_t to_block;
@@ -1276,7 +1276,7 @@ unsigned long vdso_rt_size = 0;
 void *bootstrap_start = NULL;
 unsigned int bootstrap_len = 0;
 
-void __export_unmap(void)
+__visible void __export_unmap(void)
 {
 	sys_munmap(bootstrap_start, bootstrap_len - vdso_rt_size);
 }
@@ -1608,7 +1608,7 @@ static int restore_membarrier_registrations(int mask)
  * and jump execution to some predefined ip read from
  * core file.
  */
-long __export_restore_task(struct task_restore_args *args)
+__visible long __export_restore_task(struct task_restore_args *args)
 {
 	long ret = -1;
 	int i;
